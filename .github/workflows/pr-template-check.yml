@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   validate_pr_body:
+    if: github.repository == 'NuvioMedia/NuvioMobile'
     runs-on: ubuntu-latest
     steps:
       - name: Validate required PR sections
