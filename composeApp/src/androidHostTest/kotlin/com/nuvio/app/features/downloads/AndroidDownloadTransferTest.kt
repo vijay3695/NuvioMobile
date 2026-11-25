@@ -26,6 +26,24 @@ class AndroidDownloadTransferTest {
     @get:Rule val temporary = TemporaryFolder()
 
     @Test
+    fun knownMediaSizeIsCheckedBeforeTheNetworkRequest(): Unit = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("media bytes"))
+            val item = downloadItem(server.url("/video").toString()).copy(totalBytes = 10_000L)
+            val directory = temporary.newFolder()
+
+            val error = assertFailsWith<DownloadStorageException> {
+                transferAndroidDownload(item, directory, null,
+                    onHeaders = { _, _ -> }, onProgress = { _, _ -> },
+                    availableStorageBytes = { 512L })
+            }
+
+            assertEquals(10_000L, error.requiredBytes)
+            assertNull(server.takeRequest(100, TimeUnit.MILLISECONDS))
+        }
+    }
+
+    @Test
     fun resumesPartialFileWithRangeAndValidator(): Unit = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(206).setHeader("Content-Range", "bytes 5-10/11")
