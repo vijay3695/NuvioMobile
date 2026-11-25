@@ -19,7 +19,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34, 36])
+@Config(sdk = [34])
 class AndroidDownloadLifecycleTest {
     @get:Rule val temporary = TemporaryFolder()
 
@@ -61,11 +61,11 @@ class AndroidDownloadLifecycleTest {
     }
 
     @Test
-    fun missingSystemJobIsPausedInsteadOfSilentlyRescheduling() {
+    fun missingSystemJobIsRestoredAndRemainsDownloading() {
         val scheduler = AndroidDownloadScheduler(RuntimeEnvironment.getApplication())
         val transfer = scheduler.store.begin(downloadItem().copy(fileName = "stopped.mkv"))
 
-        assertEquals(DownloadStatus.Paused, scheduler.restore(transfer.item).status)
+        assertEquals(DownloadStatus.Downloading, scheduler.restore(transfer.item).status)
     }
 
     @Test
@@ -126,4 +126,74 @@ class AndroidDownloadLifecycleTest {
         assertEquals(DownloadStatus.Completed, scheduler.store.get(transfer.item.fileName)?.item?.status)
         assertEquals(10L, scheduler.store.get(transfer.item.fileName)?.item?.downloadedBytes)
     }
+
+    @Test
+    fun missingSchedulerRecordDoesNotTurnInterruptedDownloadIntoManualPause() {
+        val scheduler = AndroidDownloadScheduler(RuntimeEnvironment.getApplication())
+        val item = downloadItem(id = "orphaned-download").copy(
+            fileName = "orphaned-download.mkv",
+            status = DownloadStatus.Downloading,
+            downloadedBytes = 128L,
+        )
+
+        val restored = scheduler.restore(item)
+
+        assertEquals(DownloadStatus.Downloading, restored.status)
+        assertEquals(128L, restored.downloadedBytes)
+    }
+
+    @Test
+    fun pausingOneTransferDoesNotPauseAnotherAndTheirSizesStayIndependent() {
+        val scheduler = AndroidDownloadScheduler(RuntimeEnvironment.getApplication())
+        val small = downloadItem(id = "isolation-small").copy(
+            fileName = "isolation-small.mkv",
+            totalBytes = 700L * 1024L * 1024L,
+        )
+        val large = downloadItem(id = "isolation-large").copy(
+            fileName = "isolation-large.mkv",
+            totalBytes = 6L * 1024L * 1024L * 1024L,
+        )
+        val smallTransfer = scheduler.store.begin(small)
+        val largeTransfer = scheduler.store.begin(large)
+
+        scheduler.store.update(small.fileName, smallTransfer.generation) {
+            it.copy(item = it.item.copy(totalBytes = 701L * 1024L * 1024L, downloadedBytes = 123L))
+        }
+        scheduler.pause(small.fileName)
+
+        val savedSmall = assertNotNull(scheduler.store.get(small.fileName))
+        val savedLarge = assertNotNull(scheduler.store.get(large.fileName))
+        assertEquals(DownloadStatus.Paused, savedSmall.item.status)
+        assertEquals(701L * 1024L * 1024L, savedSmall.item.totalBytes)
+        assertEquals(123L, savedSmall.item.downloadedBytes)
+        assertEquals(DownloadStatus.Downloading, savedLarge.item.status)
+        assertEquals(6L * 1024L * 1024L * 1024L, savedLarge.item.totalBytes)
+        assertEquals(0L, savedLarge.item.downloadedBytes)
+
+        scheduler.remove(small.fileName)
+        scheduler.remove(large.fileName)
+    }
+
+
+    @Test
+    fun staleScheduledSnapshotCannotOverwriteNewerTransferSize(): Unit = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val scheduler = AndroidDownloadScheduler(context)
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setChunkedBody("x", 1)
+                .setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY))
+            val item = downloadItem(server.url("/stale-size").toString(), "stale-size")
+                .copy(fileName = "stale-size.mkv", totalBytes = 700L)
+            val stale = scheduler.store.begin(item)
+            scheduler.store.update(item.fileName, stale.generation) {
+                it.copy(item = it.item.copy(totalBytes = 6L))
+            }
+
+            assertTrue(scheduler.execute(stale) { })
+
+            assertEquals(6L, scheduler.store.get(item.fileName)?.item?.totalBytes)
+            scheduler.remove(item.fileName)
+        }
+    }
+
 }

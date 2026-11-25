@@ -1,5 +1,7 @@
 package com.nuvio.app.features.downloads
 
+import java.util.UUID
+
 import com.nuvio.app.features.player.SubtitleRequestExtras
 import com.nuvio.app.features.player.addonSubtitleRequests
 import com.nuvio.app.features.streams.StreamItem
@@ -196,7 +198,7 @@ object DownloadsRepository {
             fileName = fileName,
             status = DownloadStatus.Downloading,
             downloadedBytes = 0L,
-            totalBytes = null,
+            totalBytes = stream.behaviorHints.videoSize?.takeIf { it > 0L },
             errorMessage = null,
             createdAtEpochMs = now,
             updatedAtEpochMs = now,
@@ -269,7 +271,7 @@ object DownloadsRepository {
     internal fun reattachBackgroundDownload(downloadId: String) {
         if (!hasLoaded) return
         val item = _uiState.value.items.firstOrNull { it.id == downloadId } ?: return
-        activeHandles.remove(downloadId)?.cancel()
+        activeHandles.remove(downloadId)?.detach()
         val restored = DownloadsPlatformDownloader.restoreItem(item)
         replaceItem(restored)
         persist()
@@ -431,10 +433,14 @@ object DownloadsRepository {
 
     private fun nextDownloadId(nowEpochMs: Long): String {
         nextDownloadOrdinal += 1L
+        // The ordinal is process-local. Add a random suffix so IDs/file names cannot
+        // collide after a process restart at the same timestamp.
         return buildString {
             append(nowEpochMs.toString(36))
             append('_')
             append(nextDownloadOrdinal.toString(36))
+            append('_')
+            append(UUID.randomUUID().toString().replace("-", "").take(8))
         }
     }
 

@@ -34,6 +34,10 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.ConnectionPool
 
+internal const val MAX_ANDROID_DOWNLOAD_RETRIES = 1_000
+internal const val MAX_ANDROID_DOWNLOAD_HTTP_RETRIES = 20
+internal const val MAX_ANDROID_DOWNLOAD_RETRY_DELAY_MS = 60_000L
+
 internal class AndroidDownloadScheduler(val context: Context) {
     val store = AndroidDownloadStore(File(context.filesDir, "download-transfers"))
     val directory = File(context.filesDir, "downloads")
@@ -54,7 +58,7 @@ internal class AndroidDownloadScheduler(val context: Context) {
                 val work = OneTimeWorkRequestBuilder<DownloadsTransferWorker>()
                     .setInputData(workDataOf(FILE_NAME to item.fileName, GENERATION to transfer.generation))
                     .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
-                    .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+                    .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 10, TimeUnit.SECONDS)
                     .build()
                 val operation = WorkManager.getInstance(context).enqueueUniqueWork(
                     workName(transfer), if (existing) ExistingWorkPolicy.KEEP else ExistingWorkPolicy.REPLACE, work,
@@ -81,7 +85,7 @@ internal class AndroidDownloadScheduler(val context: Context) {
             .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
             .setPersisted(true)
             .setEstimatedNetworkBytes(transfer.item.totalBytes ?: JobInfo.NETWORK_BYTES_UNKNOWN.toLong(), 0L)
-            .setBackoffCriteria(30_000L, JobInfo.BACKOFF_POLICY_EXPONENTIAL)
+            .setBackoffCriteria(10_000L, JobInfo.BACKOFF_POLICY_EXPONENTIAL)
             .setExtras(PersistableBundle().apply {
                 putString(FILE_NAME, transfer.item.fileName)
                 putString(GENERATION, transfer.generation)
@@ -93,16 +97,25 @@ internal class AndroidDownloadScheduler(val context: Context) {
         context.getSystemService(JobScheduler::class.java).forNamespace(JOB_NAMESPACE)
 
     fun restore(item: DownloadItem): DownloadItem {
-        var transfer = store.get(item.fileName)?.takeIf { it.item.id == item.id }
-            ?: return if (item.status == DownloadStatus.Downloading) {
-                item.copy(status = DownloadStatus.Paused, errorMessage = null)
-            } else item
-        if (transfer.item.status == DownloadStatus.Downloading && Build.VERSION.SDK_INT >= 34 &&
-            jobScheduler().getPendingJob(transfer.jobId) == null) {
-            pause(item.fileName)
-            transfer = store.get(item.fileName) ?: transfer
+        val transfer = store.get(item.fileName)?.takeIf { it.item.id == item.id }
+            ?: return item // Keep an interrupted transfer active; startDownload() recreates its scheduler record.
+        if (transfer.item.status == DownloadStatus.Downloading && Build.VERSION.SDK_INT >= 34) {
+            // getPendingJob() returns null while a JobScheduler job is executing. Treating that
+            // as proof the job disappeared incorrectly converted live downloads to Paused.
+            // getAllPendingJobs() includes both queued and currently running jobs.
+            val isScheduled = jobScheduler().allPendingJobs.any { it.id == transfer.jobId }
+            if (!isScheduled) {
+                runCatching {
+                    check(jobScheduler().schedule(buildJob(transfer)) == JobScheduler.RESULT_SUCCESS) {
+                        "Android could not restore the background download job"
+                    }
+                }.onFailure { error ->
+                    fail(transfer, error as? Exception ?: IOException(error.message ?: "Could not restore download"))
+                    notifyCurrent(item.fileName)
+                }
+            }
         }
-        return transfer.item
+        return store.get(item.fileName)?.item ?: transfer.item
     }
 
     fun pause(fileName: String) {
@@ -141,7 +154,9 @@ internal class AndroidDownloadScheduler(val context: Context) {
         onProgress: (AndroidDownloadTransfer) -> Unit,
     ): Boolean = lock(transfer.item.fileName).withLock {
         val fileName = transfer.item.fileName
-        if (!isActive(transfer)) return@withLock false
+        val currentTransfer = store.get(fileName)?.takeIf { it.generation == transfer.generation }
+            ?: return@withLock false
+        if (!isActive(currentTransfer)) return@withLock false
         val destination = File(directory, fileName)
         val client = if (network != null) {
             downloadHttpClient.newBuilder()
@@ -151,30 +166,33 @@ internal class AndroidDownloadScheduler(val context: Context) {
                 .build()
         } else downloadHttpClient
         try {
-            DownloadSubtitles.prepare(transfer.item, destination.toURI().toString())
+            DownloadSubtitles.prepare(currentTransfer.item, destination.toURI().toString())
             currentCoroutineContext().ensureActive()
-            if (!isActive(transfer)) return@withLock false
+            if (!isActive(currentTransfer)) return@withLock false
             var lastProgressAt = 0L
             val partial = if (destination.isFile) destination else transferAndroidDownload(
-                item = transfer.item,
+                item = currentTransfer.item,
                 directory = directory,
-                validator = transfer.validator,
+                validator = currentTransfer.validator,
                 client = client,
                 onHeaders = { total, validator ->
-                    updateActive(transfer) { it.copy(validator = validator, item = it.item.copy(totalBytes = total)) }
+                    updateActive(currentTransfer) { it.copy(validator = validator, item = it.item.copy(totalBytes = total)) }
                 },
                 onProgress = { bytes, total ->
                     val now = SystemClock.elapsedRealtime()
                     if (now - lastProgressAt >= 1_000L || bytes == total) {
                         lastProgressAt = now
-                        updateActive(transfer) {
-                            it.copy(item = it.item.copy(downloadedBytes = bytes, totalBytes = total))
+                        updateActive(currentTransfer) {
+                            it.copy(
+                                retryCount = it.retryCount,
+                                item = it.item.copy(downloadedBytes = bytes, totalBytes = total),
+                            )
                         }?.let(onProgress)
                     }
                 },
             )
             currentCoroutineContext().ensureActive()
-            updateActive(transfer) { current ->
+            updateActive(currentTransfer) { current ->
                 if (partial != destination && !partial.renameTo(destination)) {
                     throw IOException("Could not finalize the downloaded file")
                 }
@@ -185,21 +203,26 @@ internal class AndroidDownloadScheduler(val context: Context) {
                     downloadedBytes = bytes,
                     totalBytes = bytes,
                     errorMessage = null,
-                ))
+                ), retryCount = 0)
             }
             false
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
             currentCoroutineContext().ensureActive()
-            if (!isActive(transfer)) return@withLock false
-            val retry = shouldRetryAndroidDownload(error, transfer.retryCount)
-            if (retry) updateActive(transfer) { it.copy(retryCount = it.retryCount + 1) }
-            else fail(transfer, error)
+            if (!isActive(currentTransfer)) return@withLock false
+            val retry = shouldRetryAndroidDownload(error, store.get(fileName)?.retryCount ?: currentTransfer.retryCount)
+            if (retry) updateActive(currentTransfer) { it.copy(retryCount = it.retryCount.coerceAtMost(Int.MAX_VALUE - 1) + 1) }
+            else fail(currentTransfer, error)
             retry
         } finally {
             if (network != null) withContext(NonCancellable + Dispatchers.IO) { client.connectionPool.evictAll() }
         }
+    }
+
+    internal fun retryDelayMillis(transfer: AndroidDownloadTransfer): Long {
+        val exponent = (transfer.retryCount - 1).coerceIn(0, 5)
+        return (2_000L shl exponent).coerceAtMost(MAX_ANDROID_DOWNLOAD_RETRY_DELAY_MS)
     }
 
     fun isActive(transfer: AndroidDownloadTransfer): Boolean = store.get(transfer.item.fileName)?.let {
@@ -235,9 +258,39 @@ internal class AndroidDownloadScheduler(val context: Context) {
     }
 }
 
-internal fun shouldRetryAndroidDownload(error: Exception, retries: Int): Boolean =
-    retries < 4 && when (error) {
-        is DownloadHttpException -> error.statusCode == 408 || error.statusCode == 429 || error.statusCode in 500..599
-        is IOException -> true
+internal fun shouldRetryAndroidDownload(error: Exception, retries: Int): Boolean {
+    return when (error) {
+        is DownloadStorageException -> false
+        is DownloadHttpException -> when (error.statusCode) {
+            // These source/CDN errors can be temporary; keep retrying with capped backoff.
+            408, 409, 425, 429 -> true
+            // A missing/invalid source or rejected request should not loop forever.
+            400, 404 -> retries < MAX_ANDROID_DOWNLOAD_HTTP_RETRIES
+            401, 403 -> retries < 3 // Usually expired credentials; keep attempts bounded.
+            413, 416, 422 -> false // Invalid/unsupported request (416 has its own range-reset path).
+            in 500..599 -> true
+            else -> false
+        }
+        is java.net.SocketTimeoutException,
+        is java.net.SocketException,
+        is java.net.ConnectException,
+        is java.net.UnknownHostException,
+        is java.io.InterruptedIOException -> true
+        is javax.net.ssl.SSLException -> false // Certificate/TLS failures won't heal by repeating the same request.
+        is IOException -> retries < MAX_ANDROID_DOWNLOAD_RETRIES && !isLocalDownloadFailure(error)
         else -> false
     }
+}
+
+private fun isLocalDownloadFailure(error: IOException): Boolean {
+    if (error is java.io.FileNotFoundException || error is java.nio.file.AccessDeniedException) return true
+    // ENOSPC and filesystem permission errors are not network failures; don't burn retry attempts.
+    val message = generateSequence(error as Throwable?) { it.cause }
+        .mapNotNull { it.message }
+        .joinToString(" ")
+        .lowercase()
+    return listOf(
+        "no space left", "disk full", "not enough space", "permission denied",
+        "read-only file system", "cannot create", "failed to create",
+    ).any(message::contains)
+}

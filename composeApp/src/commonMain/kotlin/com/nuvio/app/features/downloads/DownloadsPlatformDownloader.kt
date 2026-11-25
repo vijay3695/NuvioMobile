@@ -10,6 +10,9 @@ internal data class DownloadPlatformRequest(
 
 internal interface DownloadsTaskHandle {
     fun cancel()
+
+    /** Stop observing an already scheduled transfer without pausing its background job. */
+    fun detach() = cancel()
 }
 
 internal expect object DownloadsPlatformDownloader {

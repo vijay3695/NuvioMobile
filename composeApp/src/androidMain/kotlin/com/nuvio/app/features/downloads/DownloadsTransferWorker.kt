@@ -25,9 +25,23 @@ class DownloadsTransferWorker(context: Context, parameters: WorkerParameters) : 
                     if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0,
                 ))
             }
-            val retry = scheduler.execute(transfer) { DownloadsLiveStatusPlatform.notifyTransfer(it.item) }
+
+            // Run one attempt per WorkManager execution. A retry is persisted and scheduled
+            // by WorkManager, so a stopped worker does not lose its in-memory retry loop.
+            val current = scheduler.store.get(fileName)?.takeIf { it.generation == generation }
+                ?: return Result.success()
+            if (!scheduler.isActive(current)) return Result.success()
+
+            val retry = scheduler.execute(current) { DownloadsLiveStatusPlatform.notifyTransfer(it.item) }
             scheduler.notifyCurrent(fileName)
-            return if (retry) Result.retry() else Result.success()
+            if (!retry) return Result.success()
+
+            val latest = scheduler.store.get(fileName)?.takeIf { it.generation == generation }
+                ?: return Result.success()
+            if (!scheduler.isActive(latest)) return Result.success()
+
+            // WorkManager persists this retry/backoff across worker stops and process death.
+            return Result.retry()
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {

@@ -13,6 +13,10 @@ import kotlinx.coroutines.withTimeout
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.SocketPolicy
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import org.junit.runner.RunWith
 import org.junit.Rule
 import org.junit.rules.TemporaryFolder
 import kotlin.test.Test
@@ -22,8 +26,28 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
 class AndroidDownloadTransferTest {
     @get:Rule val temporary = TemporaryFolder()
+
+    @Test
+    fun knownMediaSizeIsCheckedBeforeTheNetworkRequest(): Unit = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("media bytes"))
+            val item = downloadItem(server.url("/video").toString()).copy(totalBytes = 10_000L)
+            val directory = temporary.newFolder()
+
+            val error = assertFailsWith<DownloadStorageException> {
+                transferAndroidDownload(item, directory, null,
+                    onHeaders = { _, _ -> }, onProgress = { _, _ -> },
+                    availableStorageBytes = { 512L })
+            }
+
+            assertEquals(10_000L, error.requiredBytes)
+            assertNull(server.takeRequest(100, TimeUnit.MILLISECONDS))
+        }
+    }
 
     @Test
     fun resumesPartialFileWithRangeAndValidator(): Unit = runBlocking {
@@ -58,6 +82,64 @@ class AndroidDownloadTransferTest {
     }
 
     @Test
+    fun rejectedRangeWithHttp400RestartsFromZero(): Unit = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(400).setBody("range rejected"))
+            server.enqueue(MockResponse().setBody("complete media after restart"))
+            val directory = temporary.newFolder()
+            File(directory, "video.mkv.part").writeText("partial")
+            val output = transferAndroidDownload(
+                downloadItem(server.url("/video").toString()), directory, "\"stable\"",
+                onHeaders = { _, _ -> }, onProgress = { _, _ -> },
+            )
+
+            assertEquals("complete media after restart", output.readText())
+            val rejectedRange = server.takeRequest()
+            assertEquals("bytes=7-", rejectedRange.getHeader("Range"))
+            assertEquals("\"stable\"", rejectedRange.getHeader("If-Range"))
+            val restarted = server.takeRequest()
+            assertNull(restarted.getHeader("Range"))
+            assertNull(restarted.getHeader("If-Range"))
+        }
+    }
+
+    @Test
+    fun ignoredRangeWithoutValidatorRestartsFromTheBeginning(): Unit = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("complete replacement"))
+            val directory = temporary.newFolder()
+            File(directory, "video.mkv.part").writeText("stale bytes")
+
+            val output = transferAndroidDownload(downloadItem(server.url("/video").toString()), directory,
+                null, onHeaders = { _, _ -> }, onProgress = { _, _ -> })
+
+            assertEquals("complete replacement", output.readText())
+            assertEquals("bytes=11-", server.takeRequest().getHeader("Range"))
+        }
+    }
+
+    @Test
+    fun resumesPartialFileWithVerifiedRangeWhenSourceHasNoValidator(): Unit = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(206)
+                .setHeader("Content-Range", "bytes 5-11/12")
+                .setBody("world!!"))
+            val directory = temporary.newFolder()
+            val partial = File(directory, "video.mkv.part").apply { writeText("hello") }
+            val item = downloadItem(server.url("/video").toString()).copy(totalBytes = 12L)
+
+            val output = transferAndroidDownload(item, directory, null,
+                onHeaders = { _, validator -> assertNull(validator) },
+                onProgress = { _, _ -> })
+
+            assertEquals("helloworld!!", output.readText())
+            val request = server.takeRequest()
+            assertEquals("bytes=5-", request.getHeader("Range"))
+            assertNull(request.getHeader("If-Range"))
+        }
+    }
+
+    @Test
     fun unsatisfiedRangeRetriesFromZero(): Unit = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(416))
@@ -65,10 +147,27 @@ class AndroidDownloadTransferTest {
             val directory = temporary.newFolder()
             File(directory, "video.mkv.part").writeText("old prefix")
             val output = transferAndroidDownload(downloadItem(server.url("/video").toString()), directory,
-                null, onHeaders = { _, _ -> }, onProgress = { _, _ -> })
+                "\"stable\"", onHeaders = { _, _ -> }, onProgress = { _, _ -> })
             assertEquals("replacement", output.readText())
             assertEquals("bytes=10-", server.takeRequest().getHeader("Range"))
             assertNull(server.takeRequest().getHeader("Range"))
+        }
+    }
+
+    @Test
+    fun invalidResumeRechecksSpaceForTheFullRestart(): Unit = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(416))
+            val directory = temporary.newFolder()
+            File(directory, "video.mkv.part").writeText("123456789")
+            val item = downloadItem(server.url("/video").toString()).copy(totalBytes = 10L)
+
+            assertFailsWith<DownloadStorageException> {
+                transferAndroidDownload(item, directory, "\"stable\"",
+                    onHeaders = { _, _ -> }, onProgress = { _, _ -> },
+                    availableStorageBytes = { 1L })
+            }
+            assertEquals(1, server.requestCount)
         }
     }
 
@@ -84,6 +183,71 @@ class AndroidDownloadTransferTest {
             }
             assertEquals("hello", partial.readText())
         }
+    }
+
+    @Test
+    fun partialContentRangeWithoutKnownTotalMustStillBeComplete(): Unit = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(206)
+                .setHeader("Content-Range", "bytes 5-10/*")
+                .setChunkedBody("short", 5))
+            val directory = temporary.newFolder()
+            val partial = File(directory, "video.mkv.part").apply { writeText("hello") }
+
+            assertFailsWith<IOException> {
+                transferAndroidDownload(downloadItem(server.url("/video").toString()), directory,
+                    null, onHeaders = { _, _ -> }, onProgress = { _, _ -> })
+            }
+            assertEquals("hello", partial.readText())
+            assertFalse(File(directory, "video.mkv").exists())
+        }
+    }
+
+    @Test
+    fun unknownTotalForResumedRangeRestartsFromZero() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(206)
+                .setHeader("Content-Range", "bytes 6-11/*").setBody("partial"))
+            server.enqueue(MockResponse().setBody("complete media"))
+            val directory = temporary.newFolder()
+            File(directory, "video.mkv.part").writeText("prefix")
+
+            val output = transferAndroidDownload(downloadItem(server.url("/video").toString()), directory,
+                "\"stable\"", onHeaders = { _, _ -> }, onProgress = { _, _ -> })
+
+            assertEquals("complete media", output.readText())
+            assertEquals("bytes=6-", server.takeRequest().getHeader("Range"))
+            assertNull(server.takeRequest().getHeader("Range"))
+        }
+    }
+
+    @Test
+    fun storageIsRecheckedBeforeWritingEachChunk() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("media data"))
+            val directory = temporary.newFolder()
+            var checks = 0
+
+            assertFailsWith<DownloadStorageException> {
+                transferAndroidDownload(downloadItem(server.url("/video").toString()), directory,
+                    null, onHeaders = { _, _ -> }, onProgress = { _, _ -> },
+                    availableStorageBytes = {
+                        checks++
+                        if (checks == 1) 1_000L else 0L
+                    })
+            }
+
+            assertEquals(2, checks)
+            assertEquals(0L, File(directory, "video.mkv.part").length())
+            assertFalse(File(directory, "video.mkv").exists())
+        }
+    }
+
+    @Test
+    fun contentRangeRejectsOverflowAndInvalidTotals() {
+        assertNull(parseDownloadContentRange("bytes 0-9223372036854775807/*"))
+        assertNull(parseDownloadContentRange("bytes 5-10/10"))
+        assertEquals(6L, parseDownloadContentRange("bytes 5-10/*")?.responseBytes)
     }
 
     @Test
@@ -120,12 +284,49 @@ class AndroidDownloadTransferTest {
     }
 
     @Test
-    fun retryPolicyDistinguishesTransientAndPermanentFailures() {
+    fun retryPolicyRetriesCommonCdnErrorsAndStopsAtConfiguredCeiling() {
         assertTrue(shouldRetryAndroidDownload(IOException("connection lost"), 0))
         assertTrue(shouldRetryAndroidDownload(DownloadHttpException(503), 0))
+        assertTrue(shouldRetryAndroidDownload(DownloadHttpException(503), MAX_ANDROID_DOWNLOAD_RETRIES))
         assertTrue(shouldRetryAndroidDownload(DownloadHttpException(429), 0))
-        assertFalse(shouldRetryAndroidDownload(DownloadHttpException(403), 0))
-        assertFalse(shouldRetryAndroidDownload(IOException("connection lost"), 4))
+        assertTrue(shouldRetryAndroidDownload(DownloadHttpException(400), 0))
+        assertTrue(shouldRetryAndroidDownload(DownloadHttpException(404), 0))
+        assertTrue(shouldRetryAndroidDownload(DownloadHttpException(408), 0))
+        assertTrue(shouldRetryAndroidDownload(DownloadHttpException(403), 0))
+        assertFalse(shouldRetryAndroidDownload(DownloadHttpException(403), 3))
+        assertFalse(shouldRetryAndroidDownload(DownloadHttpException(422), 0))
+        assertFalse(shouldRetryAndroidDownload(DownloadStorageException(100L, 10L), 0))
+        assertFalse(shouldRetryAndroidDownload(IOException("No space left on device"), 0))
+        assertFalse(shouldRetryAndroidDownload(IOException("connection lost"), MAX_ANDROID_DOWNLOAD_RETRIES))
+    }
+
+    @Test
+    fun retryDelayGrowsAndCapsAtOneMinute() {
+        val scheduler = AndroidDownloadScheduler(RuntimeEnvironment.getApplication())
+        val base = downloadItem()
+        val delays = (1..8).map { retry ->
+            scheduler.retryDelayMillis(AndroidDownloadTransfer(base, 1, "retry-$retry", retryCount = retry))
+        }
+        assertEquals(listOf(2_000L, 4_000L, 8_000L, 16_000L, 32_000L, 60_000L, 60_000L, 60_000L), delays)
+    }
+
+    @Test
+    fun validRangeThatStopsBeforeTheFileEndIsNotMarkedComplete(): Unit = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(206)
+                .setHeader("Content-Range", "bytes 5-7/11")
+                .setBody("end"))
+            val directory = temporary.newFolder()
+            val partial = File(directory, "video.mkv.part").apply { writeText("start") }
+
+            assertFailsWith<IOException> {
+                transferAndroidDownload(downloadItem(server.url("/video").toString()), directory,
+                    "\"stable\"", onHeaders = { _, _ -> }, onProgress = { _, _ -> })
+            }
+
+            assertEquals("startend", partial.readText())
+            assertFalse(File(directory, "video.mkv").exists())
+        }
     }
 }
 

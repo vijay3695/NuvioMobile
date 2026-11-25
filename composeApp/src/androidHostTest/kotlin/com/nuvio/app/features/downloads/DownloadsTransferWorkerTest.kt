@@ -62,4 +62,89 @@ class DownloadsTransferWorkerTest {
             }
         }
     }
+
+    @Test
+    fun persistsTransientRetryAcrossWorkerExecutionsWithoutPausing(): Unit = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val scheduler = DownloadsPlatformDownloader.scheduler(context)
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(503))
+            server.enqueue(MockResponse().setResponseCode(503))
+            server.enqueue(MockResponse().setBody("recovered media"))
+            val id = UUID.randomUUID().toString()
+            val item = downloadItem(server.url("/retry").toString(), id).copy(fileName = "$id.mkv")
+            val transfer = scheduler.store.begin(item)
+            val input = workDataOf(
+                AndroidDownloadScheduler.FILE_NAME to item.fileName,
+                AndroidDownloadScheduler.GENERATION to transfer.generation,
+            )
+
+            fun worker() = TestListenableWorkerBuilder<DownloadsTransferWorker>(context)
+                .setInputData(input)
+                .setForegroundUpdater { _, _, _ ->
+                    SettableFuture.create<Void>().apply { set(null) }
+                }
+                .build()
+
+            assertEquals(ListenableWorker.Result.retry(), worker().doWork())
+            assertEquals(1, assertNotNull(scheduler.store.get(item.fileName)).retryCount)
+            assertEquals(DownloadStatus.Downloading, scheduler.store.get(item.fileName)?.item?.status)
+
+            assertEquals(ListenableWorker.Result.retry(), worker().doWork())
+            assertEquals(2, assertNotNull(scheduler.store.get(item.fileName)).retryCount)
+            assertEquals(DownloadStatus.Downloading, scheduler.store.get(item.fileName)?.item?.status)
+
+            assertEquals(ListenableWorker.Result.success(), worker().doWork())
+            assertEquals(3, server.requestCount)
+            val saved = assertNotNull(scheduler.store.get(item.fileName))
+            assertEquals(DownloadStatus.Completed, saved.item.status)
+            assertEquals(0, saved.retryCount)
+            assertEquals("recovered media", File(scheduler.directory, item.fileName).readText())
+        }
+    }
+
+    @Test
+    fun workerResumesDirectHttpPartialWithoutValidatorAndCompletesAutomatically(): Unit = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val scheduler = DownloadsPlatformDownloader.scheduler(context)
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(206)
+                .setHeader("Content-Range", "bytes 5-11/12")
+                .setBody("world!!"))
+            val id = UUID.randomUUID().toString()
+            val item = downloadItem(server.url("/direct-media").toString(), id).copy(
+                fileName = "$id.mkv",
+                status = DownloadStatus.Downloading,
+                downloadedBytes = 5L,
+                totalBytes = 12L,
+            )
+            check(scheduler.directory.mkdirs() || scheduler.directory.isDirectory)
+            File(scheduler.directory, "${item.fileName}.part").writeText("hello")
+            val transfer = scheduler.store.begin(item)
+            val worker = TestListenableWorkerBuilder<DownloadsTransferWorker>(context)
+                .setInputData(workDataOf(
+                    AndroidDownloadScheduler.FILE_NAME to item.fileName,
+                    AndroidDownloadScheduler.GENERATION to transfer.generation,
+                ))
+                .setForegroundUpdater { _, _, _ ->
+                    SettableFuture.create<Void>().apply { set(null) }
+                }
+                .build()
+
+            assertEquals(ListenableWorker.Result.success(), worker.doWork())
+
+            val saved = assertNotNull(scheduler.store.get(item.fileName))
+            assertEquals(DownloadStatus.Completed, saved.item.status)
+            assertEquals("helloworld!!", File(scheduler.directory, item.fileName).readText())
+            assertEquals("bytes=5-", server.takeRequest().getHeader("Range"))
+            assertEquals(1, server.requestCount)
+        }
+    }
+
+    @Test
+    fun retryPolicyAcceptsTemporaryNotFoundAndServerErrorsWithoutManualResume() {
+        assertEquals(true, shouldRetryAndroidDownload(DownloadHttpException(404), 0))
+        assertEquals(true, shouldRetryAndroidDownload(DownloadHttpException(503), 1))
+        assertEquals(false, shouldRetryAndroidDownload(DownloadHttpException(404), MAX_ANDROID_DOWNLOAD_RETRIES))
+    }
 }

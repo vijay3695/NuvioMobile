@@ -27,6 +27,7 @@ import platform.Foundation.NSHTTPURLResponse
 import platform.Foundation.NSHomeDirectory
 import platform.Foundation.NSMutableURLRequest
 import platform.Foundation.NSOperationQueue
+import platform.Foundation.NSNumber
 import platform.Foundation.NSURL
 import platform.Foundation.NSURLIsExcludedFromBackupKey
 import platform.Foundation.NSURLRequestReloadIgnoringLocalCacheData
@@ -86,6 +87,13 @@ internal actual object DownloadsPlatformDownloader {
             try {
                 DownloadSubtitles.prepare(request.item, NSURL.fileURLWithPath(destinationPath).absoluteString!!)
                 var resumeFromBytes = fileSizeOrNull(tempPath)?.coerceAtLeast(0L) ?: 0L
+                request.item.totalBytes?.takeIf { it > 0L }?.let { total ->
+                    val required = (total - resumeFromBytes).coerceAtLeast(0L)
+                    val available = availableStorageBytes(downloadsDirectory)
+                    if (available != null && available < required) {
+                        throw IllegalStateException("Not enough storage space. Need $required bytes, but only $available bytes are available.")
+                    }
+                }
 
                 var attemptedRangeRequest = resumeFromBytes > 0L
                 var result = performDownloadRequest(
@@ -101,6 +109,12 @@ internal actual object DownloadsPlatformDownloader {
                     removePathIfExists(tempPath)
                     resumeFromBytes = 0L
                     attemptedRangeRequest = false
+                    request.item.totalBytes?.takeIf { it > 0L }?.let { required ->
+                        val available = availableStorageBytes(downloadsDirectory)
+                        if (available != null && available < required) {
+                            throw IllegalStateException("Not enough storage space. Need $required bytes, but only $available bytes are available.")
+                        }
+                    }
                     result = performDownloadRequest(
                         request = request,
                         rangeStart = null,
@@ -114,6 +128,7 @@ internal actual object DownloadsPlatformDownloader {
                 if (result.statusCode !in 200..299) {
                     error(runBlocking { getString(Res.string.network_request_failed_http, result.statusCode) })
                 }
+                validateIosDownloadResponse(result, attemptedRangeRequest, resumeFromBytes)
 
                 val isPartialResume = attemptedRangeRequest && result.statusCode == 206 && resumeFromBytes > 0L
                 val startingBytes = if (isPartialResume) resumeFromBytes else 0L
@@ -228,6 +243,7 @@ private data class IosDownloadResult(
     val statusCode: Int,
     val contentRange: String?,
     val contentLength: Long?,
+    val bytesReceived: Long = 0L,
 )
 
 @OptIn(ExperimentalForeignApi::class)
@@ -235,6 +251,8 @@ private class IosDownloadDelegate(
     private val attemptedRangeRequest: Boolean,
     private val resumeFromBytes: Long,
     private val tempPath: String,
+    private val estimatedTotalBytes: Long?,
+    private val availableStorageBytes: () -> Long?,
     private val onProgress: (downloadedBytes: Long, totalBytes: Long?) -> Unit,
 ) : NSObject(), NSURLSessionDataDelegateProtocol {
     private val completion = CompletableDeferred<IosDownloadResult>()
@@ -276,7 +294,14 @@ private class IosDownloadDelegate(
                 isPartialResume = isPartialResume,
                 contentRangeHeader = nextResult.contentRange,
                 contentLength = nextResult.contentLength,
-            )
+            ) ?: estimatedTotalBytes
+            totalBytesForResponse?.let { required ->
+                val remaining = (required - startingBytesForResponse).coerceAtLeast(0L)
+                val available = availableStorageBytes()
+                if (available != null && available < remaining) {
+                    fileError = IllegalStateException("Not enough storage space. Need $remaining bytes, but only $available bytes are available.")
+                }
+            }
 
             outputFile = fopen(tempPath, if (isPartialResume) "ab" else "wb") ?: run {
                 fileError = IllegalStateException(runBlocking { getString(Res.string.downloads_error_open_partial_file_failed) })
@@ -284,6 +309,7 @@ private class IosDownloadDelegate(
             }
 
             reportProgress(startingBytesForResponse, totalBytesForResponse)
+            if (fileError != null) dataTask.cancel()
         }
 
         completionHandler(1L)
@@ -302,6 +328,15 @@ private class IosDownloadDelegate(
         }
 
         val bytesToWrite = didReceiveData.length.toLong()
+        val requiredBytes = totalBytesForResponse?.let {
+            (it - startingBytesForResponse - bytesWrittenForResponse).coerceAtLeast(bytesToWrite)
+        } ?: bytesToWrite
+        val available = availableStorageBytes()
+        if (available != null && available < requiredBytes) {
+            fileError = IllegalStateException("Not enough storage space. Need $requiredBytes bytes, but only $available bytes are available.")
+            dataTask.cancel()
+            return
+        }
         val wrote = fwrite(
             didReceiveData.bytes,
             1.convert(),
@@ -328,6 +363,12 @@ private class IosDownloadDelegate(
     ) {
         closeOutputFile()
 
+        val error = fileError
+        if (error != null) {
+            completion.completeExceptionally(error)
+            return
+        }
+
         if (didCompleteWithError != null) {
             completion.completeExceptionally(
                 IllegalStateException(didCompleteWithError.localizedDescription),
@@ -335,13 +376,7 @@ private class IosDownloadDelegate(
             return
         }
 
-        val error = fileError
-        if (error != null) {
-            completion.completeExceptionally(error)
-            return
-        }
-
-        completion.complete(result ?: task.response.toDownloadResult())
+        completion.complete((result ?: task.response.toDownloadResult()).copy(bytesReceived = bytesWrittenForResponse))
     }
 
     override fun URLSessionDidFinishEventsForBackgroundURLSession(session: NSURLSession) {
@@ -392,6 +427,12 @@ private fun NSURLResponse?.toDownloadResult(): IosDownloadResult {
             ?.toLongOrNull()
             ?.takeIf { it > 0L },
     )
+}
+
+@OptIn(ExperimentalForeignApi::class)
+private fun availableStorageBytes(path: String): Long? {
+    val attributes = NSFileManager.defaultManager.attributesOfFileSystemForPath(path, error = null)
+    return (attributes?.get("NSFileSystemFreeSize") as? NSNumber)?.longLongValue
 }
 
 @OptIn(ExperimentalForeignApi::class)
@@ -459,6 +500,8 @@ private suspend fun performDownloadRequest(
         attemptedRangeRequest = rangeStart != null && rangeStart > 0L,
         resumeFromBytes = resumeFromBytes,
         tempPath = tempPath,
+        estimatedTotalBytes = request.item.totalBytes?.takeIf { it > 0L },
+        availableStorageBytes = { availableStorageBytes(downloadsDirectoryPath()) },
         onProgress = onProgress,
     )
     val configuration = NSURLSessionConfiguration.defaultSessionConfiguration().apply {
@@ -531,4 +574,43 @@ private fun parseContentRangeTotal(headerValue: String?): Long? {
     val totalPart = value.substring(slashIndex + 1).trim()
     if (totalPart == "*") return null
     return totalPart.toLongOrNull()?.takeIf { it > 0L }
+}
+private data class IosContentRange(
+    val start: Long,
+    val end: Long,
+    val total: Long,
+) {
+    val responseBytes: Long get() = end - start + 1L
+}
+
+private fun parseIosContentRange(value: String?): IosContentRange? {
+    val match = Regex("bytes (\\d+)-(\\d+)/(\\d+)").matchEntire(value?.trim().orEmpty()) ?: return null
+    val start = match.groupValues[1].toLongOrNull() ?: return null
+    val end = match.groupValues[2].toLongOrNull() ?: return null
+    val total = match.groupValues[3].toLongOrNull() ?: return null
+    if (end < start || end - start == Long.MAX_VALUE || total <= 0L || end >= total) return null
+    return IosContentRange(start, end, total)
+}
+
+private fun validateIosDownloadResponse(
+    result: IosDownloadResult,
+    requestedRange: Boolean,
+    resumeFromBytes: Long,
+) {
+    if (result.statusCode == 206) {
+        val range = parseIosContentRange(result.contentRange)
+            ?: error("The server returned an incomplete or unverifiable byte range.")
+        if (!requestedRange || range.start != resumeFromBytes || range.end != range.total - 1L) {
+            error("The server returned a partial response that does not cover the complete remaining file.")
+        }
+        if (result.contentLength != null && result.contentLength != range.responseBytes) {
+            error("The server's byte-range length does not match its response size.")
+        }
+        if (result.bytesReceived != range.responseBytes) {
+            error("The download ended before the requested byte range was complete.")
+        }
+    } else if (result.statusCode == 200 && result.contentLength != null &&
+        result.bytesReceived != result.contentLength) {
+        error("The download ended before all bytes were received.")
+    }
 }

@@ -35,13 +35,21 @@ class DownloadsTransferJobService : JobService() {
             DownloadsLiveStatusPlatform.buildNotification(this, transfer.item), JOB_END_NOTIFICATION_POLICY_REMOVE)
         val run = scope.launch(start = CoroutineStart.LAZY) {
             try {
-                val retry = scheduler.execute(transfer, params.network) { updated ->
-                    updated.item.totalBytes?.let { updateEstimatedNetworkBytes(params, it, 0L) }
-                    updateTransferredNetworkBytes(params, updated.item.downloadedBytes, 0L)
-                    DownloadsLiveStatusPlatform.notifyTransfer(updated.item)
+                val current = scheduler.store.get(fileName)?.takeIf { it.generation == generation }
+                if (current != null && scheduler.isActive(current)) {
+                    val retry = scheduler.execute(current, params.network) { updated ->
+                        updated.item.totalBytes?.let { updateEstimatedNetworkBytes(params, it, 0L) }
+                        updateTransferredNetworkBytes(params, updated.item.downloadedBytes, 0L)
+                        DownloadsLiveStatusPlatform.notifyTransfer(updated.item)
+                    }
+                    scheduler.notifyCurrent(fileName)
+                    // JobScheduler owns retry timing and persists rescheduling across
+                    // service/process termination. Never hold a retry loop in RAM here.
+                    val latest = scheduler.store.get(fileName)?.takeIf { it.generation == generation }
+                    jobFinished(params, retry && latest != null && scheduler.isActive(latest))
+                } else {
+                    jobFinished(params, false)
                 }
-                jobFinished(params, retry)
-                scheduler.notifyCurrent(fileName)
             } finally {
                 if (runs[generation] === currentCoroutineContext()[Job]) runs.remove(generation)
             }
