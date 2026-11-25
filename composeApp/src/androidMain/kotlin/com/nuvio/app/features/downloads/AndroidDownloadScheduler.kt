@@ -156,12 +156,12 @@ internal class AndroidDownloadScheduler(val context: Context) {
                 .build()
         } else downloadHttpClient
         try {
-            DownloadSubtitles.prepare(transfer.item, destination.toURI().toString())
+            DownloadSubtitles.prepare(currentTransfer.item, destination.toURI().toString())
             currentCoroutineContext().ensureActive()
-            if (!isActive(transfer)) return@withLock false
+            if (!isActive(currentTransfer)) return@withLock false
             var lastProgressAt = 0L
             val partial = if (destination.isFile) destination else transferAndroidDownload(
-                item = transfer.item,
+                item = currentTransfer.item,
                 directory = directory,
                 validator = currentTransfer.validator,
                 client = client,
@@ -200,10 +200,10 @@ internal class AndroidDownloadScheduler(val context: Context) {
             throw cancelled
         } catch (error: Exception) {
             currentCoroutineContext().ensureActive()
-            if (!isActive(transfer)) return@withLock false
+            if (!isActive(currentTransfer)) return@withLock false
             val retry = shouldRetryAndroidDownload(error, store.get(fileName)?.retryCount ?: currentTransfer.retryCount)
             if (retry) updateActive(currentTransfer) { it.copy(retryCount = it.retryCount + 1) }
-            else fail(transfer, error)
+            else fail(currentTransfer, error)
             retry
         } finally {
             if (network != null) withContext(NonCancellable + Dispatchers.IO) { client.connectionPool.evictAll() }
