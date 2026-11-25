@@ -96,9 +96,13 @@ internal suspend fun transferAndroidDownload(
                     val totalBytes = range?.totalBytes ?: contentLength?.let { startingBytes + it } ?: estimatedTotalBytes
                     val responseValidator = response.header("ETag")?.takeUnless { it.startsWith("W/") }
                         ?: response.header("Last-Modified")
-                    val resolvedTotalBytes = totalBytes ?: estimatedTotalBytes\n                    val requiredRemainingBytes = resolvedTotalBytes?.let { (it - startingBytes).coerceAtLeast(0L) }
-                    if (requiredRemainingBytes != null && directory.usableSpace < requiredRemainingBytes) {
-                        throw DownloadStorageException(requiredRemainingBytes, directory.usableSpace)
+                    val resolvedTotalBytes = totalBytes ?: estimatedTotalBytes
+                    val requiredRemainingBytes = resolvedTotalBytes?.let { (it - startingBytes).coerceAtLeast(0L) }
+                    if (requiredRemainingBytes != null) {
+                        val available = availableStorageBytes()
+                        if (available < requiredRemainingBytes) {
+                            throw DownloadStorageException(requiredRemainingBytes, available)
+                        }
                     }
                     onHeaders(totalBytes, responseValidator)
                     var downloaded = startingBytes
