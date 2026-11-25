@@ -26,13 +26,19 @@ class DownloadsTransferWorker(context: Context, parameters: WorkerParameters) : 
                     if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0,
                 ))
             }
-            while (scheduler.isActive(transfer)) {
-                val retry = scheduler.execute(transfer) { DownloadsLiveStatusPlatform.notifyTransfer(it.item) }
+            while (true) {
+                // Refresh persisted state every attempt: execute() updates retryCount there.
+                val current = scheduler.store.get(fileName)?.takeIf { it.generation == generation }
+                    ?: return Result.success()
+                if (!scheduler.isActive(current)) return Result.success()
+                val retry = scheduler.execute(current) { DownloadsLiveStatusPlatform.notifyTransfer(it.item) }
                 scheduler.notifyCurrent(fileName)
                 if (!retry) return Result.success()
-                // Keep the work and its foreground notification alive while retrying.
-                // delay() is cancellable, so pause/cancel remains immediate.
-                delay(scheduler.retryDelayMillis(scheduler.store.get(fileName) ?: transfer))
+                val latest = scheduler.store.get(fileName)?.takeIf { it.generation == generation }
+                    ?: return Result.success()
+                if (!scheduler.isActive(latest)) return Result.success()
+                // Keep the foreground work alive during bounded exponential backoff.
+                delay(scheduler.retryDelayMillis(latest))
             }
             return Result.success()
         } catch (cancelled: CancellationException) {
