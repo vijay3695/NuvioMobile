@@ -34,7 +34,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.ConnectionPool
 
-internal const val MAX_ANDROID_DOWNLOAD_RETRIES = 20
+internal const val MAX_ANDROID_DOWNLOAD_RETRIES = 1_000
+internal const val MAX_ANDROID_DOWNLOAD_HTTP_RETRIES = 20
 internal const val MAX_ANDROID_DOWNLOAD_RETRY_DELAY_MS = 60_000L
 
 internal class AndroidDownloadScheduler(val context: Context) {
@@ -202,7 +203,7 @@ internal class AndroidDownloadScheduler(val context: Context) {
             currentCoroutineContext().ensureActive()
             if (!isActive(currentTransfer)) return@withLock false
             val retry = shouldRetryAndroidDownload(error, store.get(fileName)?.retryCount ?: currentTransfer.retryCount)
-            if (retry) updateActive(currentTransfer) { it.copy(retryCount = it.retryCount + 1) }
+            if (retry) updateActive(currentTransfer) { it.copy(retryCount = it.retryCount.coerceAtMost(Int.MAX_VALUE - 1) + 1) }
             else fail(currentTransfer, error)
             retry
         } finally {
@@ -249,12 +250,13 @@ internal class AndroidDownloadScheduler(val context: Context) {
 }
 
 internal fun shouldRetryAndroidDownload(error: Exception, retries: Int): Boolean {
-    if (retries >= MAX_ANDROID_DOWNLOAD_RETRIES) return false
     return when (error) {
         is DownloadStorageException -> false
         is DownloadHttpException -> when (error.statusCode) {
-            // Media/CDN endpoints sometimes transiently reject a signed or ranged URL.
-            400, 404, 408, 409, 425, 429 -> true
+            // These source/CDN errors can be temporary; keep retrying with capped backoff.
+            408, 409, 425, 429 -> true
+            // A missing/invalid source or rejected request should not loop forever.
+            400, 404 -> retries < MAX_ANDROID_DOWNLOAD_HTTP_RETRIES
             401, 403 -> retries < 3 // Usually expired credentials; keep attempts bounded.
             413, 416, 422 -> false // Invalid/unsupported request (416 has its own range-reset path).
             in 500..599 -> true
@@ -266,7 +268,7 @@ internal fun shouldRetryAndroidDownload(error: Exception, retries: Int): Boolean
         is java.net.UnknownHostException,
         is java.io.InterruptedIOException -> true
         is javax.net.ssl.SSLException -> false // Certificate/TLS failures won't heal by repeating the same request.
-        is IOException -> !isLocalDownloadFailure(error)
+        is IOException -> retries < MAX_ANDROID_DOWNLOAD_RETRIES && !isLocalDownloadFailure(error)
         else -> false
     }
 }
