@@ -8,6 +8,7 @@ import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import com.nuvio.app.core.build.AppFeaturePolicy
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 
 class DownloadsTransferWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
     override suspend fun doWork(): Result {
@@ -25,9 +26,15 @@ class DownloadsTransferWorker(context: Context, parameters: WorkerParameters) : 
                     if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0,
                 ))
             }
-            val retry = scheduler.execute(transfer) { DownloadsLiveStatusPlatform.notifyTransfer(it.item) }
-            scheduler.notifyCurrent(fileName)
-            return if (retry) Result.retry() else Result.success()
+            while (scheduler.isActive(transfer)) {
+                val retry = scheduler.execute(transfer) { DownloadsLiveStatusPlatform.notifyTransfer(it.item) }
+                scheduler.notifyCurrent(fileName)
+                if (!retry) return Result.success()
+                // Keep the work and its foreground notification alive while retrying.
+                // delay() is cancellable, so pause/cancel remains immediate.
+                delay(scheduler.retryDelayMillis(scheduler.store.get(fileName) ?: transfer))
+            }
+            return Result.success()
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
