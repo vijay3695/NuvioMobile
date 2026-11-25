@@ -287,6 +287,7 @@ class AndroidDownloadTransferTest {
     fun retryPolicyRetriesCommonCdnErrorsAndStopsAtConfiguredCeiling() {
         assertTrue(shouldRetryAndroidDownload(IOException("connection lost"), 0))
         assertTrue(shouldRetryAndroidDownload(DownloadHttpException(503), 0))
+        assertTrue(shouldRetryAndroidDownload(DownloadHttpException(503), MAX_ANDROID_DOWNLOAD_RETRIES))
         assertTrue(shouldRetryAndroidDownload(DownloadHttpException(429), 0))
         assertTrue(shouldRetryAndroidDownload(DownloadHttpException(400), 0))
         assertTrue(shouldRetryAndroidDownload(DownloadHttpException(404), 0))
