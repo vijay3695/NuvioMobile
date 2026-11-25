@@ -95,6 +95,44 @@ class DownloadsTransferWorkerTest {
     }
 
     @Test
+    fun workerResumesDirectHttpPartialWithoutValidatorAndCompletesAutomatically(): Unit = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val scheduler = DownloadsPlatformDownloader.scheduler(context)
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(206)
+                .setHeader("Content-Range", "bytes 5-11/12")
+                .setBody("world!!"))
+            val id = UUID.randomUUID().toString()
+            val item = downloadItem(server.url("/direct-media").toString(), id).copy(
+                fileName = "$id.mkv",
+                status = DownloadStatus.Downloading,
+                downloadedBytes = 5L,
+                totalBytes = 12L,
+            )
+            check(scheduler.directory.mkdirs() || scheduler.directory.isDirectory)
+            File(scheduler.directory, "${item.fileName}.part").writeText("hello")
+            val transfer = scheduler.store.begin(item)
+            val worker = TestListenableWorkerBuilder<DownloadsTransferWorker>(context)
+                .setInputData(workDataOf(
+                    AndroidDownloadScheduler.FILE_NAME to item.fileName,
+                    AndroidDownloadScheduler.GENERATION to transfer.generation,
+                ))
+                .setForegroundUpdater { _, _, _ ->
+                    SettableFuture.create<Void>().apply { set(null) }
+                }
+                .build()
+
+            assertEquals(ListenableWorker.Result.success(), worker.doWork())
+
+            val saved = assertNotNull(scheduler.store.get(item.fileName))
+            assertEquals(DownloadStatus.Completed, saved.item.status)
+            assertEquals("helloworld!!", File(scheduler.directory, item.fileName).readText())
+            assertEquals("bytes=5-", server.takeRequest().getHeader("Range"))
+            assertEquals(1, server.requestCount)
+        }
+    }
+
+    @Test
     fun retryPolicyAcceptsTemporaryNotFoundAndServerErrorsWithoutManualResume() {
         assertEquals(true, shouldRetryAndroidDownload(DownloadHttpException(404), 0))
         assertEquals(true, shouldRetryAndroidDownload(DownloadHttpException(503), 1))
