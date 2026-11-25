@@ -41,7 +41,29 @@ class DownloadsTransferWorkerTest {
                 ))
                 .setForegroundUpdater { _, _, info ->
                     promotions += info
-                    SettableFuture.create<Void>().apply { set(null)     @Test
+                    SettableFuture.create<Void>().apply { set(null) }
+                }
+                .build()
+
+            assertEquals(ListenableWorker.Result.success(), worker.doWork())
+
+            val completed = assertNotNull(scheduler.store.get(item.fileName)).item
+            assertEquals(DownloadStatus.Completed, completed.status)
+            assertEquals("complete video", File(scheduler.directory, item.fileName).readText())
+            assertEquals(14L, completed.downloadedBytes)
+            assertEquals("Bearer test", server.takeRequest().getHeader("Authorization"))
+            assertEquals(if (AppFeaturePolicy.downloadForegroundServiceEnabled) 1 else 0, promotions.size)
+            promotions.singleOrNull()?.let { info ->
+                assertEquals(DownloadsLiveStatusPlatform.notificationId(item.id), info.notificationId)
+                assertEquals(
+                    if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0,
+                    info.foregroundServiceType,
+                )
+            }
+        }
+    }
+
+    @Test
     fun retriesTransientHttpFailureWithoutPausingTheDownload(): Unit = runBlocking {
         val context = RuntimeEnvironment.getApplication()
         val scheduler = DownloadsPlatformDownloader.scheduler(context)
@@ -66,28 +88,6 @@ class DownloadsTransferWorkerTest {
             val recovered = assertNotNull(scheduler.store.get(item.fileName)).item
             assertEquals(DownloadStatus.Completed, recovered.status)
             assertEquals("recovered media", File(scheduler.directory, item.fileName).readText())
-        }
-    }
-
-}
-                }
-                .build()
-
-            assertEquals(ListenableWorker.Result.success(), worker.doWork())
-
-            val completed = assertNotNull(scheduler.store.get(item.fileName)).item
-            assertEquals(DownloadStatus.Completed, completed.status)
-            assertEquals("complete video", File(scheduler.directory, item.fileName).readText())
-            assertEquals(14L, completed.downloadedBytes)
-            assertEquals("Bearer test", server.takeRequest().getHeader("Authorization"))
-            assertEquals(if (AppFeaturePolicy.downloadForegroundServiceEnabled) 1 else 0, promotions.size)
-            promotions.singleOrNull()?.let { info ->
-                assertEquals(DownloadsLiveStatusPlatform.notificationId(item.id), info.notificationId)
-                assertEquals(
-                    if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0,
-                    info.foregroundServiceType,
-                )
-            }
         }
     }
 }
