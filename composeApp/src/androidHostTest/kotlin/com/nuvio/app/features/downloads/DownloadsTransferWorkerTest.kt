@@ -69,6 +69,7 @@ class DownloadsTransferWorkerTest {
         val scheduler = DownloadsPlatformDownloader.scheduler(context)
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(503))
+            server.enqueue(MockResponse().setResponseCode(503))
             server.enqueue(MockResponse().setBody("recovered media"))
             val id = UUID.randomUUID().toString()
             val item = downloadItem(server.url("/retry").toString(), id).copy(fileName = "$id.mkv")
@@ -84,9 +85,11 @@ class DownloadsTransferWorkerTest {
                 .build()
 
             assertEquals(ListenableWorker.Result.success(), worker.doWork())
-            assertEquals(2, server.requestCount)
-            val recovered = assertNotNull(scheduler.store.get(item.fileName)).item
+            assertEquals(3, server.requestCount)
+            val saved = assertNotNull(scheduler.store.get(item.fileName))
+            val recovered = saved.item
             assertEquals(DownloadStatus.Completed, recovered.status)
+            assertEquals(0, saved.retryCount)
             assertEquals("recovered media", File(scheduler.directory, item.fileName).readText())
         }
     }
