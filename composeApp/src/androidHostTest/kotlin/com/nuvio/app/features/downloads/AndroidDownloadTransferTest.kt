@@ -241,7 +241,7 @@ class AndroidDownloadTransferTest {
         assertTrue(shouldRetryAndroidDownload(DownloadHttpException(429), 0))
         assertFalse(shouldRetryAndroidDownload(DownloadHttpException(403), 0))
         assertFalse(shouldRetryAndroidDownload(DownloadStorageException(100L, 10L), 0))
-        assertFalse(shouldRetryAndroidDownload(IOException("connection lost"), 4))
+        assertFalse(shouldRetryAndroidDownload(IOException("connection lost"), 10))
     }
 
     @Test
