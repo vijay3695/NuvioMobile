@@ -41,7 +41,35 @@ class DownloadsTransferWorkerTest {
                 ))
                 .setForegroundUpdater { _, _, info ->
                     promotions += info
+                    SettableFuture.create<Void>().apply { set(null)     @Test
+    fun retriesTransientHttpFailureWithoutPausingTheDownload(): Unit = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val scheduler = DownloadsPlatformDownloader.scheduler(context)
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(503))
+            server.enqueue(MockResponse().setBody("recovered media"))
+            val id = UUID.randomUUID().toString()
+            val item = downloadItem(server.url("/retry").toString(), id).copy(fileName = "$id.mkv")
+            val transfer = scheduler.store.begin(item)
+            val worker = TestListenableWorkerBuilder<DownloadsTransferWorker>(context)
+                .setInputData(workDataOf(
+                    AndroidDownloadScheduler.FILE_NAME to item.fileName,
+                    AndroidDownloadScheduler.GENERATION to transfer.generation,
+                ))
+                .setForegroundUpdater { _, _, _ ->
                     SettableFuture.create<Void>().apply { set(null) }
+                }
+                .build()
+
+            assertEquals(ListenableWorker.Result.success(), worker.doWork())
+            assertEquals(2, server.requestCount)
+            val recovered = assertNotNull(scheduler.store.get(item.fileName)).item
+            assertEquals(DownloadStatus.Completed, recovered.status)
+            assertEquals("recovered media", File(scheduler.directory, item.fileName).readText())
+        }
+    }
+
+}
                 }
                 .build()
 
