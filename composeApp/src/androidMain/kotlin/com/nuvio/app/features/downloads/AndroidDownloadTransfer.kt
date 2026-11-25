@@ -57,6 +57,7 @@ internal suspend fun transferAndroidDownload(
                 }
             }
             var restarted = false
+            var restartedForUnknownRange = false
 
             while (true) {
                 ensureActive()
@@ -92,6 +93,16 @@ internal suspend fun transferAndroidDownload(
                     if (resumed && (range == null || range.start != offset)) {
                         throw IOException("Server returned an invalid download range")
                     }
+                    if (resumed && range?.totalBytes == null) {
+                        // A range with an unknown total cannot prove that this is the end of the media.
+                        // If we were resuming, retry once from byte zero without Range.
+                        if (offset > 0L && !restartedForUnknownRange) {
+                            offset = 0L
+                            restartedForUnknownRange = true
+                            return@use
+                        }
+                        throw IOException("Server did not provide a verifiable total size for the partial response")
+                    }
                     val startingBytes = if (resumed) offset else 0L
                     val body = response.body ?: throw IOException("Download response is empty")
                     val contentLength = body.contentLength().takeIf { it >= 0L }
@@ -120,6 +131,13 @@ internal suspend fun transferAndroidDownload(
                                 ensureActive()
                                 val size = input.read(buffer)
                                 if (size == -1) break
+                                val requiredBytes = totalBytes?.let {
+                                    (it - downloaded).coerceAtLeast(size.toLong())
+                                } ?: size.toLong()
+                                val available = availableStorageBytes()
+                                if (available < requiredBytes) {
+                                    throw DownloadStorageException(requiredBytes, available)
+                                }
                                 output.write(buffer, 0, size)
                                 downloaded += size
                                 onProgress(downloaded, totalBytes)
