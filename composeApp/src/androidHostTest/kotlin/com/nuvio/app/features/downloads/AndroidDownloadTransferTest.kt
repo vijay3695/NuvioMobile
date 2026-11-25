@@ -98,7 +98,7 @@ class AndroidDownloadTransferTest {
             val directory = temporary.newFolder()
             File(directory, "video.mkv.part").writeText("old prefix")
             val output = transferAndroidDownload(downloadItem(server.url("/video").toString()), directory,
-                null, onHeaders = { _, _ -> }, onProgress = { _, _ -> })
+                "\"stable\"", onHeaders = { _, _ -> }, onProgress = { _, _ -> })
             assertEquals("replacement", output.readText())
             assertEquals("bytes=10-", server.takeRequest().getHeader("Range"))
             assertNull(server.takeRequest().getHeader("Range"))
@@ -149,7 +149,7 @@ class AndroidDownloadTransferTest {
                 transferAndroidDownload(downloadItem(server.url("/video").toString()), directory,
                     null, onHeaders = { _, _ -> }, onProgress = { _, _ -> })
             }
-            assertEquals("helloshort", partial.readText())
+            assertEquals("hello", partial.readText())
             assertFalse(File(directory, "video.mkv").exists())
         }
     }
