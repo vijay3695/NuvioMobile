@@ -4,6 +4,8 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [cmp-rewrite]
+  push:
+    branches: [fix/reliable-offline-downloads]
   workflow_dispatch:
 
 permissions:
