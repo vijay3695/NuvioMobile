@@ -141,7 +141,9 @@ internal class AndroidDownloadScheduler(val context: Context) {
         onProgress: (AndroidDownloadTransfer) -> Unit,
     ): Boolean = lock(transfer.item.fileName).withLock {
         val fileName = transfer.item.fileName
-        if (!isActive(transfer)) return@withLock false
+        val currentTransfer = store.get(fileName)?.takeIf { it.generation == transfer.generation }
+            ?: return@withLock false
+        if (!isActive(currentTransfer)) return@withLock false
         val destination = File(directory, fileName)
         val client = if (network != null) {
             downloadHttpClient.newBuilder()
@@ -158,18 +160,18 @@ internal class AndroidDownloadScheduler(val context: Context) {
             val partial = if (destination.isFile) destination else transferAndroidDownload(
                 item = transfer.item,
                 directory = directory,
-                validator = transfer.validator,
+                validator = currentTransfer.validator,
                 client = client,
                 onHeaders = { total, validator ->
-                    updateActive(transfer) { it.copy(validator = validator, item = it.item.copy(totalBytes = total)) }
+                    updateActive(currentTransfer) { it.copy(validator = validator, item = it.item.copy(totalBytes = total)) }
                 },
                 onProgress = { bytes, total ->
                     val now = SystemClock.elapsedRealtime()
                     if (now - lastProgressAt >= 1_000L || bytes == total) {
                         lastProgressAt = now
-                        updateActive(transfer) {
+                        updateActive(currentTransfer) {
                             it.copy(
-                                retryCount = if (bytes > it.item.downloadedBytes) 0 else it.retryCount,
+                                retryCount = it.retryCount,
                                 item = it.item.copy(downloadedBytes = bytes, totalBytes = total),
                             )
                         }?.let(onProgress)
@@ -177,7 +179,7 @@ internal class AndroidDownloadScheduler(val context: Context) {
                 },
             )
             currentCoroutineContext().ensureActive()
-            updateActive(transfer) { current ->
+            updateActive(currentTransfer) { current ->
                 if (partial != destination && !partial.renameTo(destination)) {
                     throw IOException("Could not finalize the downloaded file")
                 }
@@ -188,7 +190,7 @@ internal class AndroidDownloadScheduler(val context: Context) {
                     downloadedBytes = bytes,
                     totalBytes = bytes,
                     errorMessage = null,
-                ))
+                ), retryCount = 0)
             }
             false
         } catch (cancelled: CancellationException) {
@@ -196,8 +198,8 @@ internal class AndroidDownloadScheduler(val context: Context) {
         } catch (error: Exception) {
             currentCoroutineContext().ensureActive()
             if (!isActive(transfer)) return@withLock false
-            val retry = shouldRetryAndroidDownload(error, transfer.retryCount)
-            if (retry) updateActive(transfer) { it.copy(retryCount = it.retryCount + 1) }
+            val retry = shouldRetryAndroidDownload(error, store.get(fileName)?.retryCount ?: currentTransfer.retryCount)
+            if (retry) updateActive(currentTransfer) { it.copy(retryCount = it.retryCount + 1) }
             else fail(transfer, error)
             retry
         } finally {
