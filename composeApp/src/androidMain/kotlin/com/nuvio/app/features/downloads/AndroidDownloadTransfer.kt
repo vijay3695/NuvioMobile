@@ -78,6 +78,12 @@ internal suspend fun transferAndroidDownload(
                     if (response.code == 416 && offset > 0L && !restarted) {
                         offset = 0L
                         restarted = true
+                        estimatedTotalBytes?.let { required ->
+                            val available = availableStorageBytes()
+                            if (available < required) {
+                                throw DownloadStorageException(required, available)
+                            }
+                        }
                         return@use
                     }
                     if (!response.isSuccessful) throw DownloadHttpException(response.code)
