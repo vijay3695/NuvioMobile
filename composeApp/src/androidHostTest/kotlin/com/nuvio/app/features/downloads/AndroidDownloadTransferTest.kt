@@ -106,6 +106,23 @@ class AndroidDownloadTransferTest {
     }
 
     @Test
+    fun invalidResumeRechecksSpaceForTheFullRestart(): Unit = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(416))
+            val directory = temporary.newFolder()
+            File(directory, "video.mkv.part").writeText("123456789")
+            val item = downloadItem(server.url("/video").toString()).copy(totalBytes = 10L)
+
+            assertFailsWith<DownloadStorageException> {
+                transferAndroidDownload(item, directory, "\"stable\"",
+                    onHeaders = { _, _ -> }, onProgress = { _, _ -> },
+                    availableStorageBytes = { 1L })
+            }
+            assertEquals(1, server.requestCount)
+        }
+    }
+
+    @Test
     fun mismatchedRangeDoesNotCorruptThePartialFile(): Unit = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(206).setHeader("Content-Range", "bytes 2-4/5").setBody("bad"))
