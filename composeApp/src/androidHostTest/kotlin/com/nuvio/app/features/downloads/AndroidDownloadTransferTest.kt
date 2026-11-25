@@ -58,6 +58,21 @@ class AndroidDownloadTransferTest {
     }
 
     @Test
+    fun partialWithoutValidatorRestartsFromTheBeginning(): Unit = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("complete replacement"))
+            val directory = temporary.newFolder()
+            File(directory, "video.mkv.part").writeText("stale bytes")
+
+            val output = transferAndroidDownload(downloadItem(server.url("/video").toString()), directory,
+                null, onHeaders = { _, _ -> }, onProgress = { _, _ -> })
+
+            assertEquals("complete replacement", output.readText())
+            assertNull(server.takeRequest().getHeader("Range"))
+        }
+    }
+
+    @Test
     fun unsatisfiedRangeRetriesFromZero(): Unit = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(416))
