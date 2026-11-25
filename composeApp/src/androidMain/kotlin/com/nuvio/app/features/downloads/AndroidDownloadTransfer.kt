@@ -45,6 +45,8 @@ internal suspend fun transferAndroidDownload(
             check(directory.isDirectory || directory.mkdirs()) { "Cannot create downloads directory" }
             val partial = File(directory, "${item.fileName}.part")
             var offset = partial.takeIf(File::isFile)?.length() ?: 0L
+            // A byte offset alone cannot prove that a changed remote file matches this partial.
+            if (offset > 0L && validator == null) offset = 0L
             var restarted = false
 
             while (true) {
