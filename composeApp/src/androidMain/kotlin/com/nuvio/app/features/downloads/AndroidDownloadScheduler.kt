@@ -97,16 +97,25 @@ internal class AndroidDownloadScheduler(val context: Context) {
         context.getSystemService(JobScheduler::class.java).forNamespace(JOB_NAMESPACE)
 
     fun restore(item: DownloadItem): DownloadItem {
-        var transfer = store.get(item.fileName)?.takeIf { it.item.id == item.id }
-            ?: return if (item.status == DownloadStatus.Downloading) {
-                item.copy(status = DownloadStatus.Paused, errorMessage = null)
-            } else item
-        if (transfer.item.status == DownloadStatus.Downloading && Build.VERSION.SDK_INT >= 34 &&
-            jobScheduler().getPendingJob(transfer.jobId) == null) {
-            pause(item.fileName)
-            transfer = store.get(item.fileName) ?: transfer
+        val transfer = store.get(item.fileName)?.takeIf { it.item.id == item.id }
+            ?: return item // Keep an interrupted transfer active; startDownload() recreates its scheduler record.
+        if (transfer.item.status == DownloadStatus.Downloading && Build.VERSION.SDK_INT >= 34) {
+            // getPendingJob() returns null while a JobScheduler job is executing. Treating that
+            // as proof the job disappeared incorrectly converted live downloads to Paused.
+            // getAllPendingJobs() includes both queued and currently running jobs.
+            val isScheduled = jobScheduler().allPendingJobs.any { it.id == transfer.jobId }
+            if (!isScheduled) {
+                runCatching {
+                    check(jobScheduler().schedule(buildJob(transfer)) == JobScheduler.RESULT_SUCCESS) {
+                        "Android could not restore the background download job"
+                    }
+                }.onFailure { error ->
+                    fail(transfer, error as? Exception ?: IOException(error.message ?: "Could not restore download"))
+                    notifyCurrent(item.fileName)
+                }
+            }
         }
-        return transfer.item
+        return store.get(item.fileName)?.item ?: transfer.item
     }
 
     fun pause(fileName: String) {
