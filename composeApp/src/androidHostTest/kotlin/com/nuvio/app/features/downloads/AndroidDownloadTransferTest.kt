@@ -76,6 +76,28 @@ class AndroidDownloadTransferTest {
     }
 
     @Test
+    fun rejectedRangeWithHttp400RestartsFromZero(): Unit = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(400).setBody("range rejected"))
+            server.enqueue(MockResponse().setBody("complete media after restart"))
+            val directory = temporary.newFolder()
+            File(directory, "video.mkv.part").writeText("partial")
+            val output = transferAndroidDownload(
+                downloadItem(server.url("/video").toString()), directory, "\"stable\"",
+                onHeaders = { _, _ -> }, onProgress = { _, _ -> },
+            )
+
+            assertEquals("complete media after restart", output.readText())
+            val rejectedRange = server.takeRequest()
+            assertEquals("bytes=7-", rejectedRange.getHeader("Range"))
+            assertEquals("\"stable\"", rejectedRange.getHeader("If-Range"))
+            val restarted = server.takeRequest()
+            assertNull(restarted.getHeader("Range"))
+            assertNull(restarted.getHeader("If-Range"))
+        }
+    }
+
+    @Test
     fun partialWithoutValidatorRestartsFromTheBeginning(): Unit = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("complete replacement"))
