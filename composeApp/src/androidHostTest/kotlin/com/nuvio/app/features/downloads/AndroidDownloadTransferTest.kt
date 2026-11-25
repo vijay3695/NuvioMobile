@@ -119,6 +119,27 @@ class AndroidDownloadTransferTest {
     }
 
     @Test
+    fun resumesPartialFileWithVerifiedRangeWhenSourceHasNoValidator(): Unit = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(206)
+                .setHeader("Content-Range", "bytes 5-11/12")
+                .setBody("world!!"))
+            val directory = temporary.newFolder()
+            val partial = File(directory, "video.mkv.part").apply { writeText("hello") }
+            val item = downloadItem(server.url("/video").toString()).copy(totalBytes = 12L)
+
+            val output = transferAndroidDownload(item, directory, null,
+                onHeaders = { _, validator -> assertNull(validator) },
+                onProgress = { _, _ -> })
+
+            assertEquals("helloworld!!", output.readText())
+            val request = server.takeRequest()
+            assertEquals("bytes=5-", request.getHeader("Range"))
+            assertNull(request.getHeader("If-Range"))
+        }
+    }
+
+    @Test
     fun unsatisfiedRangeRetriesFromZero(): Unit = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(416))
