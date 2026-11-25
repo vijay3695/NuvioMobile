@@ -36,17 +36,21 @@ class DownloadsTransferJobService : JobService() {
             DownloadsLiveStatusPlatform.buildNotification(this, transfer.item), JOB_END_NOTIFICATION_POLICY_REMOVE)
         val run = scope.launch(start = CoroutineStart.LAZY) {
             try {
-                var retry = true
-                while (retry && scheduler.isActive(transfer)) {
-                    retry = scheduler.execute(transfer, params.network) { updated ->
+                while (true) {
+                    val current = scheduler.store.get(fileName)?.takeIf { it.generation == generation }
+                        ?: break
+                    if (!scheduler.isActive(current)) break
+                    val retry = scheduler.execute(current, params.network) { updated ->
                         updated.item.totalBytes?.let { updateEstimatedNetworkBytes(params, it, 0L) }
                         updateTransferredNetworkBytes(params, updated.item.downloadedBytes, 0L)
                         DownloadsLiveStatusPlatform.notifyTransfer(updated.item)
                     }
                     scheduler.notifyCurrent(fileName)
-                    if (retry && scheduler.isActive(transfer)) {
-                        delay(scheduler.retryDelayMillis(scheduler.store.get(fileName) ?: transfer))
-                    }
+                    if (!retry) break
+                    val latest = scheduler.store.get(fileName)?.takeIf { it.generation == generation }
+                        ?: break
+                    if (!scheduler.isActive(latest)) break
+                    delay(scheduler.retryDelayMillis(latest))
                 }
                 jobFinished(params, false)
             } finally {
