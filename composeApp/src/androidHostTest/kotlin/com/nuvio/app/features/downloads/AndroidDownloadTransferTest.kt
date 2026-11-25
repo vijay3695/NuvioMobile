@@ -245,6 +245,26 @@ class AndroidDownloadTransferTest {
     }
 }
 
+
+    @Test
+    fun validRangeThatStopsBeforeTheFileEndIsNotMarkedComplete(): Unit = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(206)
+                .setHeader("Content-Range", "bytes 5-7/11")
+                .setBody("end"))
+            val directory = temporary.newFolder()
+            val partial = File(directory, "video.mkv.part").apply { writeText("start") }
+
+            assertFailsWith<IOException> {
+                transferAndroidDownload(downloadItem(server.url("/video").toString()), directory,
+                    "\\"stable\\"", onHeaders = { _, _ -> }, onProgress = { _, _ -> })
+            }
+
+            assertEquals("startend", partial.readText())
+            assertFalse(File(directory, "video.mkv").exists())
+        }
+    }
+
 internal fun downloadItem(url: String = "https://example.com/video.mkv", id: String = "test-download") = DownloadItem(
     id = id,
     contentType = "movie",
