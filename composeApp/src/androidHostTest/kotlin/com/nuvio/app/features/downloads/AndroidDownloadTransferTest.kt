@@ -257,7 +257,7 @@ class AndroidDownloadTransferTest {
 
             assertFailsWith<IOException> {
                 transferAndroidDownload(downloadItem(server.url("/video").toString()), directory,
-                    "\\"stable\\"", onHeaders = { _, _ -> }, onProgress = { _, _ -> })
+                    "\"stable\"", onHeaders = { _, _ -> }, onProgress = { _, _ -> })
             }
 
             assertEquals("startend", partial.readText())
