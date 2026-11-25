@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 
@@ -35,13 +36,19 @@ class DownloadsTransferJobService : JobService() {
             DownloadsLiveStatusPlatform.buildNotification(this, transfer.item), JOB_END_NOTIFICATION_POLICY_REMOVE)
         val run = scope.launch(start = CoroutineStart.LAZY) {
             try {
-                val retry = scheduler.execute(transfer, params.network) { updated ->
-                    updated.item.totalBytes?.let { updateEstimatedNetworkBytes(params, it, 0L) }
-                    updateTransferredNetworkBytes(params, updated.item.downloadedBytes, 0L)
-                    DownloadsLiveStatusPlatform.notifyTransfer(updated.item)
+                var retry = true
+                while (retry && scheduler.isActive(transfer)) {
+                    retry = scheduler.execute(transfer, params.network) { updated ->
+                        updated.item.totalBytes?.let { updateEstimatedNetworkBytes(params, it, 0L) }
+                        updateTransferredNetworkBytes(params, updated.item.downloadedBytes, 0L)
+                        DownloadsLiveStatusPlatform.notifyTransfer(updated.item)
+                    }
+                    scheduler.notifyCurrent(fileName)
+                    if (retry && scheduler.isActive(transfer)) {
+                        delay(scheduler.retryDelayMillis(scheduler.store.get(fileName) ?: transfer))
+                    }
                 }
-                jobFinished(params, retry)
-                scheduler.notifyCurrent(fileName)
+                jobFinished(params, false)
             } finally {
                 if (runs[generation] === currentCoroutineContext()[Job]) runs.remove(generation)
             }
