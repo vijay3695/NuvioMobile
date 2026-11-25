@@ -21,7 +21,12 @@ internal val downloadHttpClient = OkHttpClient.Builder()
     .followSslRedirects(true)
     .build()
 
-internal class DownloadHttpException(val statusCode: Int) : IOException("Download failed: HTTP $statusCode")
+internal class DownloadHttpException(val statusCode: Int, detail: String? = null) : IOException(
+    buildString {
+        append("Download failed: HTTP $statusCode")
+        detail?.takeIf { it.isNotBlank() }?.let { append(" — ").append(it.take(500)) }
+    },
+)
 
 internal class DownloadStorageException(
     val requiredBytes: Long,
@@ -58,6 +63,7 @@ internal suspend fun transferAndroidDownload(
             }
             var restarted = false
             var restartedForUnknownRange = false
+            var restartedAfterRangeBadRequest = false
 
             while (true) {
                 ensureActive()
@@ -87,7 +93,17 @@ internal suspend fun transferAndroidDownload(
                         }
                         return@use
                     }
-                    if (!response.isSuccessful) throw DownloadHttpException(response.code)
+                    if (response.code == 400 && offset > 0L && !restartedAfterRangeBadRequest) {
+                        // Some media hosts reject Range/If-Range after a pause or URL refresh.
+                        // Retry once from byte zero; a second 400 is surfaced with the server body.
+                        offset = 0L
+                        restartedAfterRangeBadRequest = true
+                        return@use
+                    }
+                    if (!response.isSuccessful) {
+                        val detail = runCatching { response.peekBody(2_048L).string().trim() }.getOrNull()
+                        throw DownloadHttpException(response.code, detail)
+                    }
                     val range = response.header("Content-Range")?.let(::parseDownloadContentRange)
                     val resumed = response.code == 206
                     if (resumed && (range == null || range.start != offset)) {
