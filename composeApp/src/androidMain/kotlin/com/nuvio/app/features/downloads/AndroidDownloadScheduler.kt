@@ -237,6 +237,7 @@ internal class AndroidDownloadScheduler(val context: Context) {
 
 internal fun shouldRetryAndroidDownload(error: Exception, retries: Int): Boolean =
     retries < 4 && when (error) {
+        is DownloadStorageException -> false
         is DownloadHttpException -> error.statusCode == 408 || error.statusCode == 429 || error.statusCode in 500..599
         is IOException -> true
         else -> false
