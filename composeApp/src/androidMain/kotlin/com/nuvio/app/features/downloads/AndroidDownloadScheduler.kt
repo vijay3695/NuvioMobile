@@ -271,5 +271,15 @@ internal fun shouldRetryAndroidDownload(error: Exception, retries: Int): Boolean
     }
 }
 
-private fun isLocalDownloadFailure(error: IOException): Boolean =
-    error is java.io.FileNotFoundException || error is java.nio.file.AccessDeniedException
+private fun isLocalDownloadFailure(error: IOException): Boolean {
+    if (error is java.io.FileNotFoundException || error is java.nio.file.AccessDeniedException) return true
+    // ENOSPC and filesystem permission errors are not network failures; don't burn retry attempts.
+    val message = generateSequence(error as Throwable?) { it.cause }
+        .mapNotNull { it.message }
+        .joinToString(" ")
+        .lowercase()
+    return listOf(
+        "no space left", "disk full", "not enough space", "permission denied",
+        "read-only file system", "cannot create", "failed to create",
+    ).any(message::contains)
+}
