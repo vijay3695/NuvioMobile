@@ -184,11 +184,11 @@ class AndroidDownloadTransferTest {
                     null, onHeaders = { _, _ -> }, onProgress = { _, _ -> },
                     availableStorageBytes = {
                         checks++
-                        if (checks <= 2) 1_000L else 0L
+                        if (checks == 1) 1_000L else 0L
                     })
             }
 
-            assertTrue(checks >= 3)
+            assertEquals(2, checks)
             assertEquals(0L, File(directory, "video.mkv.part").length())
             assertFalse(File(directory, "video.mkv").exists())
         }
