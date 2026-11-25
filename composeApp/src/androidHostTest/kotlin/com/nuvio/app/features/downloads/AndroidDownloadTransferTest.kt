@@ -257,13 +257,28 @@ class AndroidDownloadTransferTest {
     }
 
     @Test
-    fun retryPolicyDistinguishesTransientAndPermanentFailures() {
+    fun retryPolicyRetriesCommonCdnErrorsAndStopsAtConfiguredCeiling() {
         assertTrue(shouldRetryAndroidDownload(IOException("connection lost"), 0))
         assertTrue(shouldRetryAndroidDownload(DownloadHttpException(503), 0))
         assertTrue(shouldRetryAndroidDownload(DownloadHttpException(429), 0))
-        assertFalse(shouldRetryAndroidDownload(DownloadHttpException(403), 0))
+        assertTrue(shouldRetryAndroidDownload(DownloadHttpException(400), 0))
+        assertTrue(shouldRetryAndroidDownload(DownloadHttpException(404), 0))
+        assertTrue(shouldRetryAndroidDownload(DownloadHttpException(408), 0))
+        assertTrue(shouldRetryAndroidDownload(DownloadHttpException(403), 0))
+        assertFalse(shouldRetryAndroidDownload(DownloadHttpException(403), 3))
+        assertFalse(shouldRetryAndroidDownload(DownloadHttpException(422), 0))
         assertFalse(shouldRetryAndroidDownload(DownloadStorageException(100L, 10L), 0))
-        assertFalse(shouldRetryAndroidDownload(IOException("connection lost"), 10))
+        assertFalse(shouldRetryAndroidDownload(IOException("connection lost"), MAX_ANDROID_DOWNLOAD_RETRIES))
+    }
+
+    @Test
+    fun retryDelayGrowsAndCapsAtOneMinute() {
+        val scheduler = AndroidDownloadScheduler(RuntimeEnvironment.getApplication())
+        val base = downloadItem()
+        val delays = (1..8).map { retry ->
+            scheduler.retryDelayMillis(AndroidDownloadTransfer(base, 1, "retry-$retry", retryCount = retry))
+        }
+        assertEquals(listOf(2_000L, 4_000L, 8_000L, 16_000L, 32_000L, 60_000L, 60_000L, 60_000L), delays)
     }
 
     @Test
