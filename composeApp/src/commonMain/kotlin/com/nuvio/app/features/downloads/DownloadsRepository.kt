@@ -269,7 +269,7 @@ object DownloadsRepository {
     internal fun reattachBackgroundDownload(downloadId: String) {
         if (!hasLoaded) return
         val item = _uiState.value.items.firstOrNull { it.id == downloadId } ?: return
-        activeHandles.remove(downloadId)?.cancel()
+        activeHandles.remove(downloadId)?.detach()
         val restored = DownloadsPlatformDownloader.restoreItem(item)
         replaceItem(restored)
         persist()
