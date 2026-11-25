@@ -65,13 +65,17 @@ internal suspend fun transferAndroidDownload(
                     if (!response.isSuccessful) throw DownloadHttpException(response.code)
                     val range = response.header("Content-Range")?.let(::parseDownloadContentRange)
                     val resumed = response.code == 206
-                    if (resumed && (range == null || range.first != offset)) {
+                    if (resumed && (range == null || range.start != offset)) {
                         throw IOException("Server returned an invalid download range")
                     }
                     val startingBytes = if (resumed) offset else 0L
                     val body = response.body ?: throw IOException("Download response is empty")
                     val contentLength = body.contentLength().takeIf { it >= 0L }
-                    val totalBytes = range?.second ?: contentLength?.let { startingBytes + it }
+                    if (resumed && contentLength != null && range != null &&
+                        contentLength != range.responseBytes) {
+                        throw IOException("Download response length does not match its byte range")
+                    }
+                    val totalBytes = range?.totalBytes ?: contentLength?.let { startingBytes + it }
                     val responseValidator = response.header("ETag")?.takeUnless { it.startsWith("W/") }
                         ?: response.header("Last-Modified")
                     onHeaders(totalBytes, responseValidator)
@@ -92,6 +96,9 @@ internal suspend fun transferAndroidDownload(
                         }
                     }
                     ensureActive()
+                    if (resumed && range != null && downloaded - startingBytes != range.responseBytes) {
+                        throw IOException("Download ended before the requested byte range was complete")
+                    }
                     if (totalBytes != null && downloaded != totalBytes) {
                         throw IOException("Download ended before all bytes were received")
                     }
@@ -113,11 +120,20 @@ internal suspend fun transferAndroidDownload(
     }
 }
 
-internal fun parseDownloadContentRange(value: String): Pair<Long, Long?>? {
+internal data class DownloadContentRange(
+    val start: Long,
+    val end: Long,
+    val totalBytes: Long?,
+) {
+    val responseBytes: Long
+        get() = end - start + 1L
+}
+
+internal fun parseDownloadContentRange(value: String): DownloadContentRange? {
     val match = Regex("bytes (\\d+)-(\\d+)/(\\d+|\\*)").matchEntire(value.trim()) ?: return null
     val start = match.groupValues[1].toLongOrNull() ?: return null
     val end = match.groupValues[2].toLongOrNull() ?: return null
     val total = match.groupValues[3].toLongOrNull()
-    if (end < start || (total != null && end >= total)) return null
-    return start to total
+    if (end < start || end - start == Long.MAX_VALUE || (total != null && end >= total)) return null
+    return DownloadContentRange(start, end, total)
 }
