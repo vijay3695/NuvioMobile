@@ -104,7 +104,7 @@ class AndroidDownloadTransferTest {
     }
 
     @Test
-    fun partialWithoutValidatorRestartsFromTheBeginning(): Unit = runBlocking {
+    fun ignoredRangeWithoutValidatorRestartsFromTheBeginning(): Unit = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("complete replacement"))
             val directory = temporary.newFolder()
@@ -114,7 +114,7 @@ class AndroidDownloadTransferTest {
                 null, onHeaders = { _, _ -> }, onProgress = { _, _ -> })
 
             assertEquals("complete replacement", output.readText())
-            assertNull(server.takeRequest().getHeader("Range"))
+            assertEquals("bytes=10-", server.takeRequest().getHeader("Range"))
         }
     }
 
