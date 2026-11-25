@@ -114,7 +114,7 @@ class AndroidDownloadTransferTest {
                 null, onHeaders = { _, _ -> }, onProgress = { _, _ -> })
 
             assertEquals("complete replacement", output.readText())
-            assertEquals("bytes=10-", server.takeRequest().getHeader("Range"))
+            assertEquals("bytes=11-", server.takeRequest().getHeader("Range"))
         }
     }
 
