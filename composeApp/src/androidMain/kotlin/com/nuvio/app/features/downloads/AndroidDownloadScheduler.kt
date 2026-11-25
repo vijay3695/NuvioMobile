@@ -54,7 +54,7 @@ internal class AndroidDownloadScheduler(val context: Context) {
                 val work = OneTimeWorkRequestBuilder<DownloadsTransferWorker>()
                     .setInputData(workDataOf(FILE_NAME to item.fileName, GENERATION to transfer.generation))
                     .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
-                    .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+                    .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 10, TimeUnit.SECONDS)
                     .build()
                 val operation = WorkManager.getInstance(context).enqueueUniqueWork(
                     workName(transfer), if (existing) ExistingWorkPolicy.KEEP else ExistingWorkPolicy.REPLACE, work,
@@ -81,7 +81,7 @@ internal class AndroidDownloadScheduler(val context: Context) {
             .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
             .setPersisted(true)
             .setEstimatedNetworkBytes(transfer.item.totalBytes ?: JobInfo.NETWORK_BYTES_UNKNOWN.toLong(), 0L)
-            .setBackoffCriteria(30_000L, JobInfo.BACKOFF_POLICY_EXPONENTIAL)
+            .setBackoffCriteria(10_000L, JobInfo.BACKOFF_POLICY_EXPONENTIAL)
             .setExtras(PersistableBundle().apply {
                 putString(FILE_NAME, transfer.item.fileName)
                 putString(GENERATION, transfer.generation)
@@ -168,7 +168,10 @@ internal class AndroidDownloadScheduler(val context: Context) {
                     if (now - lastProgressAt >= 1_000L || bytes == total) {
                         lastProgressAt = now
                         updateActive(transfer) {
-                            it.copy(item = it.item.copy(downloadedBytes = bytes, totalBytes = total))
+                            it.copy(
+                                retryCount = if (bytes > it.item.downloadedBytes) 0 else it.retryCount,
+                                item = it.item.copy(downloadedBytes = bytes, totalBytes = total),
+                            )
                         }?.let(onProgress)
                     }
                 },
@@ -200,6 +203,11 @@ internal class AndroidDownloadScheduler(val context: Context) {
         } finally {
             if (network != null) withContext(NonCancellable + Dispatchers.IO) { client.connectionPool.evictAll() }
         }
+    }
+
+    internal fun retryDelayMillis(transfer: AndroidDownloadTransfer): Long {
+        val exponent = (transfer.retryCount - 1).coerceIn(0, 4)
+        return (2_000L shl exponent).coerceAtMost(30_000L)
     }
 
     fun isActive(transfer: AndroidDownloadTransfer): Boolean = store.get(transfer.item.fileName)?.let {
@@ -236,7 +244,7 @@ internal class AndroidDownloadScheduler(val context: Context) {
 }
 
 internal fun shouldRetryAndroidDownload(error: Exception, retries: Int): Boolean =
-    retries < 4 && when (error) {
+    retries < 10 && when (error) {
         is DownloadStorageException -> false
         is DownloadHttpException -> error.statusCode == 408 || error.statusCode == 429 || error.statusCode in 500..599
         is IOException -> true
