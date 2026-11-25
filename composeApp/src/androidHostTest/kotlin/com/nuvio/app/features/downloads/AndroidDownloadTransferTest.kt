@@ -268,6 +268,7 @@ class AndroidDownloadTransferTest {
         assertFalse(shouldRetryAndroidDownload(DownloadHttpException(403), 3))
         assertFalse(shouldRetryAndroidDownload(DownloadHttpException(422), 0))
         assertFalse(shouldRetryAndroidDownload(DownloadStorageException(100L, 10L), 0))
+        assertFalse(shouldRetryAndroidDownload(IOException("No space left on device"), 0))
         assertFalse(shouldRetryAndroidDownload(IOException("connection lost"), MAX_ANDROID_DOWNLOAD_RETRIES))
     }
 
