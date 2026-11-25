@@ -87,6 +87,31 @@ class AndroidDownloadTransferTest {
     }
 
     @Test
+    fun partialContentRangeWithoutKnownTotalMustStillBeComplete(): Unit = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(206)
+                .setHeader("Content-Range", "bytes 5-10/*")
+                .setBody("short"))
+            val directory = temporary.newFolder()
+            val partial = File(directory, "video.mkv.part").apply { writeText("hello") }
+
+            assertFailsWith<IOException> {
+                transferAndroidDownload(downloadItem(server.url("/video").toString()), directory,
+                    null, onHeaders = { _, _ -> }, onProgress = { _, _ -> })
+            }
+            assertEquals("helloshort", partial.readText())
+            assertFalse(File(directory, "video.mkv").exists())
+        }
+    }
+
+    @Test
+    fun contentRangeRejectsOverflowAndInvalidTotals() {
+        assertNull(parseDownloadContentRange("bytes 0-9223372036854775807/*"))
+        assertNull(parseDownloadContentRange("bytes 5-10/10"))
+        assertEquals(6L, parseDownloadContentRange("bytes 5-10/*")?.responseBytes)
+    }
+
+    @Test
     fun truncatedResponseNeverBecomesCompletedFile(): Unit = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("abcdefghij").setSocketPolicy(SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY))
