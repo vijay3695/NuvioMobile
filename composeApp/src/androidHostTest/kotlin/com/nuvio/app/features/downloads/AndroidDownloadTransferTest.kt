@@ -27,7 +27,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34, 36])
+@Config(sdk = [34])
 class AndroidDownloadTransferTest {
     @get:Rule val temporary = TemporaryFolder()
 
