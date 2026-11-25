@@ -23,6 +23,13 @@ internal val downloadHttpClient = OkHttpClient.Builder()
 
 internal class DownloadHttpException(val statusCode: Int) : IOException("Download failed: HTTP $statusCode")
 
+internal class DownloadStorageException(
+    val requiredBytes: Long,
+    val availableBytes: Long,
+) : IOException(
+    "Not enough storage space. Need ${requiredBytes} bytes, but only ${availableBytes} bytes are available.",
+)
+
 internal suspend fun transferAndroidDownload(
     item: DownloadItem,
     directory: File,
@@ -78,6 +85,10 @@ internal suspend fun transferAndroidDownload(
                     val totalBytes = range?.totalBytes ?: contentLength?.let { startingBytes + it }
                     val responseValidator = response.header("ETag")?.takeUnless { it.startsWith("W/") }
                         ?: response.header("Last-Modified")
+                    val requiredRemainingBytes = totalBytes?.let { (it - startingBytes).coerceAtLeast(0L) }
+                    if (requiredRemainingBytes != null && directory.usableSpace < requiredRemainingBytes) {
+                        throw DownloadStorageException(requiredRemainingBytes, directory.usableSpace)
+                    }
                     onHeaders(totalBytes, responseValidator)
                     var downloaded = startingBytes
                     onProgress(downloaded, totalBytes)
