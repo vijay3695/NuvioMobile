@@ -64,7 +64,7 @@ class DownloadsTransferWorkerTest {
     }
 
     @Test
-    fun retriesTransientHttpFailureWithoutPausingTheDownload(): Unit = runBlocking {
+    fun persistsTransientRetryAcrossWorkerExecutionsWithoutPausing(): Unit = runBlocking {
         val context = RuntimeEnvironment.getApplication()
         val scheduler = DownloadsPlatformDownloader.scheduler(context)
         MockWebServer().use { server ->
@@ -74,21 +74,30 @@ class DownloadsTransferWorkerTest {
             val id = UUID.randomUUID().toString()
             val item = downloadItem(server.url("/retry").toString(), id).copy(fileName = "$id.mkv")
             val transfer = scheduler.store.begin(item)
-            val worker = TestListenableWorkerBuilder<DownloadsTransferWorker>(context)
-                .setInputData(workDataOf(
-                    AndroidDownloadScheduler.FILE_NAME to item.fileName,
-                    AndroidDownloadScheduler.GENERATION to transfer.generation,
-                ))
+            val input = workDataOf(
+                AndroidDownloadScheduler.FILE_NAME to item.fileName,
+                AndroidDownloadScheduler.GENERATION to transfer.generation,
+            )
+
+            fun worker() = TestListenableWorkerBuilder<DownloadsTransferWorker>(context)
+                .setInputData(input)
                 .setForegroundUpdater { _, _, _ ->
                     SettableFuture.create<Void>().apply { set(null) }
                 }
                 .build()
 
-            assertEquals(ListenableWorker.Result.success(), worker.doWork())
+            assertEquals(ListenableWorker.Result.retry(), worker().doWork())
+            assertEquals(1, assertNotNull(scheduler.store.get(item.fileName)).retryCount)
+            assertEquals(DownloadStatus.Downloading, scheduler.store.get(item.fileName)?.item?.status)
+
+            assertEquals(ListenableWorker.Result.retry(), worker().doWork())
+            assertEquals(2, assertNotNull(scheduler.store.get(item.fileName)).retryCount)
+            assertEquals(DownloadStatus.Downloading, scheduler.store.get(item.fileName)?.item?.status)
+
+            assertEquals(ListenableWorker.Result.success(), worker().doWork())
             assertEquals(3, server.requestCount)
             val saved = assertNotNull(scheduler.store.get(item.fileName))
-            val recovered = saved.item
-            assertEquals(DownloadStatus.Completed, recovered.status)
+            assertEquals(DownloadStatus.Completed, saved.item.status)
             assertEquals(0, saved.retryCount)
             assertEquals("recovered media", File(scheduler.directory, item.fileName).readText())
         }
