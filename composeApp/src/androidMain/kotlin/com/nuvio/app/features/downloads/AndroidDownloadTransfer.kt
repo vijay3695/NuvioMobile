@@ -51,8 +51,12 @@ internal suspend fun transferAndroidDownload(
             check(directory.isDirectory || directory.mkdirs()) { "Cannot create downloads directory" }
             val partial = File(directory, "${item.fileName}.part")
             var offset = partial.takeIf(File::isFile)?.length() ?: 0L
-            // A byte offset alone cannot prove that a changed remote file matches this partial.
-            if (offset > 0L && validator == null) offset = 0L
+            // Many direct HTTP media hosts omit ETag and Last-Modified. Restarting at
+            // byte zero on every transient failure makes large files unable to recover.
+            // Attempt a Range resume without If-Range in that case, then require a valid
+            // Content-Range and (when known) the same total length before appending. A 200
+            // response naturally truncates the partial and starts a fresh full transfer.
+            val resumeWithoutValidator = offset > 0L && validator == null
             val estimatedTotalBytes = item.totalBytes?.takeIf { it > 0L }
             val estimatedRemainingBytes = estimatedTotalBytes?.let { (it - offset).coerceAtLeast(0L) }
             if (estimatedRemainingBytes != null) {
@@ -108,6 +112,18 @@ internal suspend fun transferAndroidDownload(
                     val resumed = response.code == 206
                     if (resumed && (range == null || range.start != offset)) {
                         throw IOException("Server returned an invalid download range")
+                    }
+                    if (resumed && resumeWithoutValidator && estimatedTotalBytes != null &&
+                        range?.totalBytes != estimatedTotalBytes) {
+                        // Without a validator we only append when the server confirms the
+                        // previously observed representation length. Otherwise preserve the
+                        // partial and retry from zero rather than mixing media versions.
+                        if (!restartedForUnknownRange) {
+                            offset = 0L
+                            restartedForUnknownRange = true
+                            return@use
+                        }
+                        throw IOException("The resumed source size changed; refusing to append mismatched bytes")
                     }
                     if (resumed && range?.totalBytes == null) {
                         // A range with an unknown total cannot prove that this is the end of the media.
