@@ -243,8 +243,6 @@ class AndroidDownloadTransferTest {
         assertFalse(shouldRetryAndroidDownload(DownloadStorageException(100L, 10L), 0))
         assertFalse(shouldRetryAndroidDownload(IOException("connection lost"), 4))
     }
-}
-
 
     @Test
     fun validRangeThatStopsBeforeTheFileEndIsNotMarkedComplete(): Unit = runBlocking {
@@ -264,6 +262,7 @@ class AndroidDownloadTransferTest {
             assertFalse(File(directory, "video.mkv").exists())
         }
     }
+}
 
 internal fun downloadItem(url: String = "https://example.com/video.mkv", id: String = "test-download") = DownloadItem(
     id = id,
