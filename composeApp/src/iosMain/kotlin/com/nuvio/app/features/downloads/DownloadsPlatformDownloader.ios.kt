@@ -302,6 +302,7 @@ private class IosDownloadDelegate(
             }
 
             reportProgress(startingBytesForResponse, totalBytesForResponse)
+            if (fileError != null) dataTask.cancel()
         }
 
         completionHandler(1L)
@@ -355,16 +356,16 @@ private class IosDownloadDelegate(
     ) {
         closeOutputFile()
 
+        val error = fileError
+        if (error != null) {
+            completion.completeExceptionally(error)
+            return
+        }
+
         if (didCompleteWithError != null) {
             completion.completeExceptionally(
                 IllegalStateException(didCompleteWithError.localizedDescription),
             )
-            return
-        }
-
-        val error = fileError
-        if (error != null) {
-            completion.completeExceptionally(error)
             return
         }
 
