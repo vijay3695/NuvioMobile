@@ -155,6 +155,46 @@ class AndroidDownloadTransferTest {
     }
 
     @Test
+    fun unknownTotalForResumedRangeRestartsFromZero() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(206)
+                .setHeader("Content-Range", "bytes 6-11/*").setBody("partial"))
+            server.enqueue(MockResponse().setBody("complete media"))
+            val directory = temporary.newFolder()
+            File(directory, "video.mkv.part").writeText("prefix")
+
+            val output = transferAndroidDownload(downloadItem(server.url("/video").toString()), directory,
+                "\"stable\"", onHeaders = { _, _ -> }, onProgress = { _, _ -> })
+
+            assertEquals("complete media", output.readText())
+            assertEquals("bytes=6-", server.takeRequest().getHeader("Range"))
+            assertNull(server.takeRequest().getHeader("Range"))
+        }
+    }
+
+    @Test
+    fun storageIsRecheckedBeforeWritingEachChunk() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("media data"))
+            val directory = temporary.newFolder()
+            var checks = 0
+
+            assertFailsWith<DownloadStorageException> {
+                transferAndroidDownload(downloadItem(server.url("/video").toString()), directory,
+                    null, onHeaders = { _, _ -> }, onProgress = { _, _ -> },
+                    availableStorageBytes = {
+                        checks++
+                        if (checks <= 2) 1_000L else 0L
+                    })
+            }
+
+            assertTrue(checks >= 3)
+            assertEquals(0L, File(directory, "video.mkv.part").length())
+            assertFalse(File(directory, "video.mkv").exists())
+        }
+    }
+
+    @Test
     fun contentRangeRejectsOverflowAndInvalidTotals() {
         assertNull(parseDownloadContentRange("bytes 0-9223372036854775807/*"))
         assertNull(parseDownloadContentRange("bytes 5-10/10"))
