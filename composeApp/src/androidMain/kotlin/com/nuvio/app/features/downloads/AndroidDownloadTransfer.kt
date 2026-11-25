@@ -37,6 +37,7 @@ internal suspend fun transferAndroidDownload(
     client: OkHttpClient = downloadHttpClient,
     onHeaders: (totalBytes: Long?, validator: String?) -> Unit,
     onProgress: (downloadedBytes: Long, totalBytes: Long?) -> Unit,
+    availableStorageBytes: () -> Long = { directory.usableSpace },
 ): File = coroutineScope {
     val activeCall = AtomicReference<Call?>()
     val transfer = async(Dispatchers.IO) {
@@ -47,6 +48,14 @@ internal suspend fun transferAndroidDownload(
             var offset = partial.takeIf(File::isFile)?.length() ?: 0L
             // A byte offset alone cannot prove that a changed remote file matches this partial.
             if (offset > 0L && validator == null) offset = 0L
+            val estimatedTotalBytes = item.totalBytes?.takeIf { it > 0L }
+            val estimatedRemainingBytes = estimatedTotalBytes?.let { (it - offset).coerceAtLeast(0L) }
+            if (estimatedRemainingBytes != null) {
+                val available = availableStorageBytes()
+                if (available < estimatedRemainingBytes) {
+                    throw DownloadStorageException(estimatedRemainingBytes, available)
+                }
+            }
             var restarted = false
 
             while (true) {
@@ -84,10 +93,10 @@ internal suspend fun transferAndroidDownload(
                         contentLength != range.responseBytes) {
                         throw IOException("Download response length does not match its byte range")
                     }
-                    val totalBytes = range?.totalBytes ?: contentLength?.let { startingBytes + it }
+                    val totalBytes = range?.totalBytes ?: contentLength?.let { startingBytes + it } ?: estimatedTotalBytes
                     val responseValidator = response.header("ETag")?.takeUnless { it.startsWith("W/") }
                         ?: response.header("Last-Modified")
-                    val requiredRemainingBytes = totalBytes?.let { (it - startingBytes).coerceAtLeast(0L) }
+                    val resolvedTotalBytes = totalBytes ?: estimatedTotalBytes\n                    val requiredRemainingBytes = resolvedTotalBytes?.let { (it - startingBytes).coerceAtLeast(0L) }
                     if (requiredRemainingBytes != null && directory.usableSpace < requiredRemainingBytes) {
                         throw DownloadStorageException(requiredRemainingBytes, directory.usableSpace)
                     }
