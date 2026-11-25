@@ -128,6 +128,21 @@ class AndroidDownloadLifecycleTest {
     }
 
     @Test
+    fun missingSchedulerRecordDoesNotTurnInterruptedDownloadIntoManualPause() {
+        val scheduler = AndroidDownloadScheduler(RuntimeEnvironment.getApplication())
+        val item = downloadItem(id = "orphaned-download").copy(
+            fileName = "orphaned-download.mkv",
+            status = DownloadStatus.Downloading,
+            downloadedBytes = 128L,
+        )
+
+        val restored = scheduler.restore(item)
+
+        assertEquals(DownloadStatus.Downloading, restored.status)
+        assertEquals(128L, restored.downloadedBytes)
+    }
+
+    @Test
     fun pausingOneTransferDoesNotPauseAnotherAndTheirSizesStayIndependent() {
         val scheduler = AndroidDownloadScheduler(RuntimeEnvironment.getApplication())
         val small = downloadItem(id = "isolation-small").copy(
