@@ -85,14 +85,15 @@ internal actual object DownloadsPlatformDownloader {
             val tempPath = "$downloadsDirectory/${request.destinationFileName}.part"
 
             try {
-                request.item.totalBytes?.takeIf { it > 0L }?.let { required ->
+                DownloadSubtitles.prepare(request.item, NSURL.fileURLWithPath(destinationPath).absoluteString!!)
+                var resumeFromBytes = fileSizeOrNull(tempPath)?.coerceAtLeast(0L) ?: 0L
+                request.item.totalBytes?.takeIf { it > 0L }?.let { total ->
+                    val required = (total - resumeFromBytes).coerceAtLeast(0L)
                     val available = availableStorageBytes(downloadsDirectory)
                     if (available != null && available < required) {
                         throw IllegalStateException("Not enough storage space. Need $required bytes, but only $available bytes are available.")
                     }
                 }
-                DownloadSubtitles.prepare(request.item, NSURL.fileURLWithPath(destinationPath).absoluteString!!)
-                var resumeFromBytes = fileSizeOrNull(tempPath)?.coerceAtLeast(0L) ?: 0L
 
                 var attemptedRangeRequest = resumeFromBytes > 0L
                 var result = performDownloadRequest(
@@ -108,6 +109,12 @@ internal actual object DownloadsPlatformDownloader {
                     removePathIfExists(tempPath)
                     resumeFromBytes = 0L
                     attemptedRangeRequest = false
+                    request.item.totalBytes?.takeIf { it > 0L }?.let { required ->
+                        val available = availableStorageBytes(downloadsDirectory)
+                        if (available != null && available < required) {
+                            throw IllegalStateException("Not enough storage space. Need $required bytes, but only $available bytes are available.")
+                        }
+                    }
                     result = performDownloadRequest(
                         request = request,
                         rangeStart = null,
