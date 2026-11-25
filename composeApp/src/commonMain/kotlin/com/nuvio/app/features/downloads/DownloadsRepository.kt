@@ -1,5 +1,7 @@
 package com.nuvio.app.features.downloads
 
+import java.util.UUID
+
 import com.nuvio.app.features.player.SubtitleRequestExtras
 import com.nuvio.app.features.player.addonSubtitleRequests
 import com.nuvio.app.features.streams.StreamItem
@@ -431,10 +433,14 @@ object DownloadsRepository {
 
     private fun nextDownloadId(nowEpochMs: Long): String {
         nextDownloadOrdinal += 1L
+        // The ordinal is process-local. Add a random suffix so IDs/file names cannot
+        // collide after a process restart at the same timestamp.
         return buildString {
             append(nowEpochMs.toString(36))
             append('_')
             append(nextDownloadOrdinal.toString(36))
+            append('_')
+            append(UUID.randomUUID().toString().replace("-", "").take(8))
         }
     }
 
