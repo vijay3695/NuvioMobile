@@ -61,11 +61,11 @@ class AndroidDownloadLifecycleTest {
     }
 
     @Test
-    fun missingSystemJobIsPausedInsteadOfSilentlyRescheduling() {
+    fun missingSystemJobIsRestoredAndRemainsDownloading() {
         val scheduler = AndroidDownloadScheduler(RuntimeEnvironment.getApplication())
         val transfer = scheduler.store.begin(downloadItem().copy(fileName = "stopped.mkv"))
 
-        assertEquals(DownloadStatus.Paused, scheduler.restore(transfer.item).status)
+        assertEquals(DownloadStatus.Downloading, scheduler.restore(transfer.item).status)
     }
 
     @Test
