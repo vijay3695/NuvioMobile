@@ -35,6 +35,10 @@ import kotlinx.coroutines.withContext
 import okhttp3.ConnectionPool
 
 internal class AndroidDownloadScheduler(val context: Context) {
+    internal companion object RetryPolicy {
+        const val MAX_AUTOMATIC_RETRIES = 20
+        const val MAX_RETRY_DELAY_MS = 60_000L
+    }
     val store = AndroidDownloadStore(File(context.filesDir, "download-transfers"))
     val directory = File(context.filesDir, "downloads")
     private val locks = ConcurrentHashMap<String, Mutex>()
@@ -208,8 +212,8 @@ internal class AndroidDownloadScheduler(val context: Context) {
     }
 
     internal fun retryDelayMillis(transfer: AndroidDownloadTransfer): Long {
-        val exponent = (transfer.retryCount - 1).coerceIn(0, 4)
-        return (2_000L shl exponent).coerceAtMost(30_000L)
+        val exponent = (transfer.retryCount - 1).coerceIn(0, 5)
+        return (2_000L shl exponent).coerceAtMost(MAX_RETRY_DELAY_MS)
     }
 
     fun isActive(transfer: AndroidDownloadTransfer): Boolean = store.get(transfer.item.fileName)?.let {
@@ -245,10 +249,28 @@ internal class AndroidDownloadScheduler(val context: Context) {
     }
 }
 
-internal fun shouldRetryAndroidDownload(error: Exception, retries: Int): Boolean =
-    retries < 10 && when (error) {
+internal fun shouldRetryAndroidDownload(error: Exception, retries: Int): Boolean {
+    if (retries >= AndroidDownloadScheduler.MAX_AUTOMATIC_RETRIES) return false
+    return when (error) {
         is DownloadStorageException -> false
-        is DownloadHttpException -> error.statusCode == 408 || error.statusCode == 429 || error.statusCode in 500..599
-        is IOException -> true
+        is DownloadHttpException -> when (error.statusCode) {
+            // Media/CDN endpoints sometimes transiently reject a signed or ranged URL.
+            400, 404, 408, 409, 425, 429 -> true
+            401, 403 -> retries < 3 // Usually expired credentials; keep attempts bounded.
+            413, 416, 422 -> false // Invalid/unsupported request (416 has its own range-reset path).
+            in 500..599 -> true
+            else -> false
+        }
+        is java.net.SocketTimeoutException,
+        is java.net.SocketException,
+        is java.net.ConnectException,
+        is java.net.UnknownHostException,
+        is java.io.InterruptedIOException -> true
+        is javax.net.ssl.SSLException -> false // Certificate/TLS failures won't heal by repeating the same request.
+        is IOException -> !isLocalDownloadFailure(error)
         else -> false
     }
+}
+
+private fun isLocalDownloadFailure(error: IOException): Boolean =
+    error is java.io.FileNotFoundException || error is java.nio.file.AccessDeniedException
