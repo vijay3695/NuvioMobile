@@ -66,6 +66,10 @@ internal actual object DownloadsPlatformDownloader {
                     scheduler.pause(request.destinationFileName)
                 }
             }
+
+            override fun detach() {
+                observer.cancel()
+            }
         }
     }
 
