@@ -13,6 +13,10 @@ import kotlinx.coroutines.withTimeout
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.SocketPolicy
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import org.junit.runner.RunWith
 import org.junit.Rule
 import org.junit.rules.TemporaryFolder
 import kotlin.test.Test
@@ -22,6 +26,8 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34, 36])
 class AndroidDownloadTransferTest {
     @get:Rule val temporary = TemporaryFolder()
 
