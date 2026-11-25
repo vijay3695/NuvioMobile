@@ -124,7 +124,7 @@ class AndroidDownloadTransferTest {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(206)
                 .setHeader("Content-Range", "bytes 5-10/*")
-                .setBody("short"))
+                .setChunkedBody("short", 5))
             val directory = temporary.newFolder()
             val partial = File(directory, "video.mkv.part").apply { writeText("hello") }
 
