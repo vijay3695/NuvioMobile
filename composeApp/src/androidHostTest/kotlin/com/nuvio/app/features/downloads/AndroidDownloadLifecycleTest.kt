@@ -126,4 +126,37 @@ class AndroidDownloadLifecycleTest {
         assertEquals(DownloadStatus.Completed, scheduler.store.get(transfer.item.fileName)?.item?.status)
         assertEquals(10L, scheduler.store.get(transfer.item.fileName)?.item?.downloadedBytes)
     }
+
+    @Test
+    fun pausingOneTransferDoesNotPauseAnotherAndTheirSizesStayIndependent() {
+        val scheduler = AndroidDownloadScheduler(RuntimeEnvironment.getApplication())
+        val small = downloadItem(id = "isolation-small").copy(
+            fileName = "isolation-small.mkv",
+            totalBytes = 700L * 1024L * 1024L,
+        )
+        val large = downloadItem(id = "isolation-large").copy(
+            fileName = "isolation-large.mkv",
+            totalBytes = 6L * 1024L * 1024L * 1024L,
+        )
+        val smallTransfer = scheduler.store.begin(small)
+        val largeTransfer = scheduler.store.begin(large)
+
+        scheduler.store.update(small.fileName, smallTransfer.generation) {
+            it.copy(item = it.item.copy(totalBytes = 701L * 1024L * 1024L, downloadedBytes = 123L))
+        }
+        scheduler.pause(small.fileName)
+
+        val savedSmall = assertNotNull(scheduler.store.get(small.fileName))
+        val savedLarge = assertNotNull(scheduler.store.get(large.fileName))
+        assertEquals(DownloadStatus.Paused, savedSmall.item.status)
+        assertEquals(701L * 1024L * 1024L, savedSmall.item.totalBytes)
+        assertEquals(123L, savedSmall.item.downloadedBytes)
+        assertEquals(DownloadStatus.Downloading, savedLarge.item.status)
+        assertEquals(6L * 1024L * 1024L * 1024L, savedLarge.item.totalBytes)
+        assertEquals(0L, savedLarge.item.downloadedBytes)
+
+        scheduler.remove(small.fileName)
+        scheduler.remove(large.fileName)
+    }
+
 }
