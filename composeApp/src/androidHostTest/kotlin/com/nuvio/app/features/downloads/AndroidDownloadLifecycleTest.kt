@@ -159,4 +159,26 @@ class AndroidDownloadLifecycleTest {
         scheduler.remove(large.fileName)
     }
 
+
+    @Test
+    fun staleScheduledSnapshotCannotOverwriteNewerTransferSize(): Unit = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val scheduler = AndroidDownloadScheduler(context)
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setChunkedBody("x", 1)
+                .setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY))
+            val item = downloadItem(server.url("/stale-size").toString(), "stale-size")
+                .copy(fileName = "stale-size.mkv", totalBytes = 700L)
+            val stale = scheduler.store.begin(item)
+            scheduler.store.update(item.fileName, stale.generation) {
+                it.copy(item = it.item.copy(totalBytes = 6L))
+            }
+
+            assertTrue(scheduler.execute(stale) { })
+
+            assertEquals(6L, scheduler.store.get(item.fileName)?.item?.totalBytes)
+            scheduler.remove(item.fileName)
+        }
+    }
+
 }
