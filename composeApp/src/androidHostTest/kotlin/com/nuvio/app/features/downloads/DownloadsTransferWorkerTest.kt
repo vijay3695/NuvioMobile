@@ -93,4 +93,36 @@ class DownloadsTransferWorkerTest {
             assertEquals("recovered media", File(scheduler.directory, item.fileName).readText())
         }
     }
+
+    @Test
+    fun retriesHttp404AndServerFailureAutomaticallyWithoutUserResume(): Unit = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val scheduler = DownloadsPlatformDownloader.scheduler(context)
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(404).setBody("temporarily missing"))
+            server.enqueue(MockResponse().setResponseCode(503).setBody("temporary CDN error"))
+            server.enqueue(MockResponse().setBody("eventually available"))
+            val id = UUID.randomUUID().toString()
+            val item = downloadItem(server.url("/recover").toString(), id).copy(fileName = "$id-recover.mkv")
+            val transfer = scheduler.store.begin(item)
+            val worker = TestListenableWorkerBuilder<DownloadsTransferWorker>(context)
+                .setInputData(workDataOf(
+                    AndroidDownloadScheduler.FILE_NAME to item.fileName,
+                    AndroidDownloadScheduler.GENERATION to transfer.generation,
+                ))
+                .setForegroundUpdater { _, _, _ ->
+                    SettableFuture.create<Void>().apply { set(null) }
+                }
+                .build()
+
+            assertEquals(ListenableWorker.Result.success(), worker.doWork())
+            assertEquals(3, server.requestCount)
+            val recovered = assertNotNull(scheduler.store.get(item.fileName))
+            assertEquals(DownloadStatus.Completed, recovered.item.status)
+            assertEquals(0, recovered.retryCount)
+            assertEquals("eventually available", File(scheduler.directory, item.fileName).readText())
+            scheduler.remove(item.fileName)
+        }
+    }
+
 }
