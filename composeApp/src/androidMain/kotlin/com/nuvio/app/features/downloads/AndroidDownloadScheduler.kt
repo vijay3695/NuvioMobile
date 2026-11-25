@@ -34,11 +34,10 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.ConnectionPool
 
+internal const val MAX_ANDROID_DOWNLOAD_RETRIES = 20
+internal const val MAX_ANDROID_DOWNLOAD_RETRY_DELAY_MS = 60_000L
+
 internal class AndroidDownloadScheduler(val context: Context) {
-    internal companion object RetryPolicy {
-        const val MAX_AUTOMATIC_RETRIES = 20
-        const val MAX_RETRY_DELAY_MS = 60_000L
-    }
     val store = AndroidDownloadStore(File(context.filesDir, "download-transfers"))
     val directory = File(context.filesDir, "downloads")
     private val locks = ConcurrentHashMap<String, Mutex>()
@@ -213,7 +212,7 @@ internal class AndroidDownloadScheduler(val context: Context) {
 
     internal fun retryDelayMillis(transfer: AndroidDownloadTransfer): Long {
         val exponent = (transfer.retryCount - 1).coerceIn(0, 5)
-        return (2_000L shl exponent).coerceAtMost(MAX_RETRY_DELAY_MS)
+        return (2_000L shl exponent).coerceAtMost(MAX_ANDROID_DOWNLOAD_RETRY_DELAY_MS)
     }
 
     fun isActive(transfer: AndroidDownloadTransfer): Boolean = store.get(transfer.item.fileName)?.let {
@@ -250,7 +249,7 @@ internal class AndroidDownloadScheduler(val context: Context) {
 }
 
 internal fun shouldRetryAndroidDownload(error: Exception, retries: Int): Boolean {
-    if (retries >= AndroidDownloadScheduler.MAX_AUTOMATIC_RETRIES) return false
+    if (retries >= MAX_ANDROID_DOWNLOAD_RETRIES) return false
     return when (error) {
         is DownloadStorageException -> false
         is DownloadHttpException -> when (error.statusCode) {
